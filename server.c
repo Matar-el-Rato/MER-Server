@@ -43,6 +43,7 @@ void handle_client(int sock_conn, db_t *db) {
         char *pass_hash = crypt(req.password, SALT);
         
         generic_res_t res;
+        memset(&res, 0, sizeof(res));
         if (db_register_user(db, req.username, pass_hash) == 0) {
             res.code = RES_SUCCESS;
             strcpy(res.message, "User registered successfully");
@@ -65,6 +66,7 @@ void handle_client(int sock_conn, db_t *db) {
 
         int user_id;
         generic_res_t res;
+        memset(&res, 0, sizeof(res));
         if (db_authenticate_user(db, req.username, pass_hash, &user_id) == 0) {
             res.code = RES_SUCCESS;
             sprintf(res.message, "Login successful. Welcome ID %d", user_id);
