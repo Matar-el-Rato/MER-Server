@@ -26,8 +26,6 @@ void db_close(db_t *db) {
 
 int db_register_user(db_t *db, const char *username, const char *password_hash) {
     char query[1024];
-    // Simple insertion. In a production app, we would use prepared statements to prevent SQL Injection.
-    // For this educational/basic version, we use sprintf.
     snprintf(query, sizeof(query), 
              "INSERT INTO users (username, password_hash) VALUES ('%s', '%s')", 
              username, password_hash);
@@ -63,4 +61,18 @@ int db_authenticate_user(db_t *db, const char *username, const char *password_ha
 
     mysql_free_result(res);
     return status;
+}
+
+int db_update_skin(db_t *db, int user_id, int skin_id) {
+    char query[512];
+    snprintf(query, sizeof(query), 
+             "UPDATE users SET skin_id=%d WHERE id=%d", 
+             skin_id, user_id);
+
+    if (mysql_query(db->conn, query)) {
+        fprintf(stderr, "Skin update error: %s\n", mysql_error(db->conn));
+        return -1;
+    }
+
+    return 0;
 }

@@ -8,11 +8,14 @@
 
 // Request Types
 typedef enum {
-    REQ_REGISTER = 1,
-    REQ_LOGIN    = 2,
-    // Future game actions can be added here
-    // REQ_JOIN_ROOM = 3,
-    // REQ_MOVE      = 4,
+    REQ_REGISTER    = 1,
+    REQ_LOGIN       = 2,
+    REQ_CHANGE_SKIN = 3, // Update user skin ID
+    REQ_LIST_ROOMS  = 4, // Future: Get list of active rooms
+    REQ_JOIN_ROOM   = 5, // Future: Join a specific room
+    REQ_SEND_CHAT   = 6, // Future: Send message (Lobby or Room)
+    REQ_GAME_ACTION = 7, // Future: Perform game move
+    REQ_LEAVE_ROOM  = 8  // Future: Exit a room back to Lobby
 } request_type_t;
 
 // Response Codes
@@ -37,6 +40,12 @@ typedef struct {
     char username[MAX_USERNAME];
     char password[MAX_PASSWORD];
 } login_req_t;
+
+typedef struct {
+    uint8_t type;
+    int user_id;
+    int skin_id;
+} change_skin_req_t;
 
 typedef struct {
     uint8_t code;

@@ -75,34 +75,61 @@ void handle_client(int sock_conn, db_t *db) {
             strcpy(res.message, "Invalid credentials");
         }
         write(sock_conn, &res, sizeof(res));
-    }
-    
-    /* 
-       FUTURE EXPANSION - GAME FUNCTIONS:
-       
-       - REQ_JOIN_ROOM:
-         - Check room capacity in `rooms` table.
-         - If space available, add user to `match_participants`.
-         - Update `current_players` in `rooms`.
-       
-       - REQ_MATCH_EVENT (e.g., player move):
-         - Validate move logic.
-         - Insert event into `match_events` table.
-         - Broadcast move to other participants (requires keeping connections open).
-       
-       - REQ_SEND_CHAT:
-         - Insert message into `chat_messages` table.
-         - Broadcast message to room/match members.
-       
-       - REQ_GET_MATCH_HISTORY:
-         - Query `matches` and `match_participants` for user ID.
-         - Return results as a list of packets.
+    } else if (req_type == REQ_CHANGE_SKIN) {
+        change_skin_req_t req;
+        read(sock_conn, (char*)&req + sizeof(uint8_t), sizeof(change_skin_req_t) - sizeof(uint8_t));
 
-       - MULTI-CLIENT HANDLING:
-         - Currently, we close after one transaction.
-         - For a real-time game, we would enter a 'game loop' here or use 
-           IO multiplexing (select/poll/epoll) in main.
-    */
+        char log_msg[256];
+        sprintf(log_msg, "Change skin request: User ID %d -> Skin ID %d\n", req.user_id, req.skin_id);
+        write(1, log_msg, strlen(log_msg));
+
+        generic_res_t res;
+        memset(&res, 0, sizeof(res));
+        if (db_update_skin(db, req.user_id, req.skin_id) == 0) {
+            res.code = RES_SUCCESS;
+            strcpy(res.message, "Skin updated successfully");
+        } else {
+            res.code = RES_ERR_DATABASE;
+            strcpy(res.message, "Failed to update skin");
+        }
+        write(sock_conn, &res, sizeof(res));
+    } else if (req_type == REQ_LIST_ROOMS) {
+        /*
+           REQ_LIST_ROOMS
+           1. Query the `rooms` table for all room IDs and player counts.
+           2. Format the results into a packet containing tuples of (room_id, current, max).
+           3. Send to client to populate the "Room Browser" UI.
+        */
+
+    } else if (req_type == REQ_JOIN_ROOM) {
+        /*
+           REQ_JOIN_ROOM
+           1. Check if room exists and if `current_players < max_players`.
+           2. Update `rooms.current_players` (increment).
+           3. Insert record into `match_participants` (linking user to current room/match).
+           4. Respond with SUCCESS and the match_id assigned.
+        */
+
+    } else if (req_type == REQ_SEND_CHAT) {
+        /*
+           REQ_SEND_CHAT
+           1. Parse message and optional `room_id`.
+           2. Insert into `chat_messages` table.
+           3. ROUTING LOGIC:
+              - If room_id is NULL/0: Broadcast to all connected clients WHO ARE NOT in a room.
+              - If room_id is NOT 0: Broadcast ONLY to clients who are match_participants in that room.
+        */
+
+    } else if (req_type == REQ_GAME_ACTION) {
+        /*
+           REQ_GAME_ACTION
+           1. Validate that the user is actually in the match.
+           2. Parse action (move, dice roll, etc) and insert into `match_events`.
+           3. Trigger "Game Logic Engine" to determine the next state.
+           4. Notify other room participants of the change.
+        */
+    }
+
 
     close(sock_conn);
 }
