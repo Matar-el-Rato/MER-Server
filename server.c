@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <errno.h>
+#include <signal.h>
 #include <crypt.h>
 #include "protocol.h"
 #include "db.h"
@@ -13,6 +14,17 @@
 #define SALT "$6$matar_el_rato$" // SHA-512 Salt
 
 #define DEFAULT_PORT 8888
+
+static int sock_listen_fd = -1;
+static db_t *db_ptr = NULL;
+
+static void handle_shutdown(int sig) {
+    (void)sig;
+    write(1, "\nShutting down...\n", 18);
+    if (sock_listen_fd != -1) close(sock_listen_fd);
+    if (db_ptr != NULL) db_close(db_ptr);
+    exit(0);
+}
 
 void error(const char *msg) {
     perror(msg);
@@ -140,16 +152,21 @@ int main(int argc, char *argv[]) {
     int port = (argc > 1) ? atoi(argv[1]) : DEFAULT_PORT;
     db_t db;
 
+    signal(SIGINT,  handle_shutdown);
+    signal(SIGTERM, handle_shutdown);
+
     // Initialize Database
     if (!db_init(&db, "localhost", "admin", "admin", "matarelrato-db")) {
         fprintf(stderr, "Failed to connect to database\n");
         exit(1);
     }
     printf("Connected to database successfully.\n");
+    db_ptr = &db;
 
     // 1. Create Socket (System Call)
     if ((sock_listen = socket(AF_INET, SOCK_STREAM, 0)) < 0)
         error("Error creant socket");
+    sock_listen_fd = sock_listen;
 
     // 2. Bind (System Call)
     memset(&serv_adr, 0, sizeof(serv_adr));
