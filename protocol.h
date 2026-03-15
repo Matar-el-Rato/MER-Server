@@ -41,7 +41,8 @@ typedef struct {
     char password[MAX_PASSWORD];
 } login_req_t;
 
-typedef struct {
+// packed: no padding after uint8_t, so sizeof = 9 and matches the C# client's 9-byte packet layout
+typedef struct __attribute__((packed)) {
     uint8_t type;
     int user_id;
     int skin_id;
