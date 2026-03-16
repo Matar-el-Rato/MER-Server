@@ -24,6 +24,7 @@ typedef enum {
     RES_ERR_USER_EXISTS = 1,
     RES_ERR_INVALID_CREDENTIALS = 2,
     RES_ERR_DATABASE = 3,
+    RES_ERR_INVALID_INPUT = 4,
     RES_ERR_UNKNOWN = 99
 } response_code_t;
 

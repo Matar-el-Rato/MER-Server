@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <errno.h>
 #include <signal.h>
+#include <ctype.h>
 #include <crypt.h>
 #include "protocol.h"
 #include "db.h"
@@ -46,16 +47,37 @@ void handle_client(int sock_conn, db_t *db) {
     if (req_type == REQ_REGISTER) {
         register_req_t req;
         read(sock_conn, (char*)&req + sizeof(uint8_t), sizeof(register_req_t) - sizeof(uint8_t));
-        
+
+        // Ensure null-termination regardless of what the client sent
+        req.username[MAX_USERNAME - 1] = '\0';
+        req.password[MAX_PASSWORD - 1] = '\0';
+
+        generic_res_t res;
+        memset(&res, 0, sizeof(res));
+
+        // Validate username: non-empty and only printable characters
+        int ulen = strlen(req.username);
+        int valid = (ulen > 0 && strlen(req.password) > 0);
+        for (int i = 0; i < ulen && valid; i++) {
+            if (!isprint((unsigned char)req.username[i]))
+                valid = 0;
+        }
+
+        if (!valid) {
+            res.code = RES_ERR_INVALID_INPUT;
+            strcpy(res.message, "Invalid username or password");
+            write(sock_conn, &res, sizeof(res));
+            close(sock_conn);
+            return;
+        }
+
         char log_msg[256];
         sprintf(log_msg, "Register request for user: %s\n", req.username);
         write(1, log_msg, strlen(log_msg));
-        
+
         // Hash the password before storing
         char *pass_hash = crypt(req.password, SALT);
-        
-        generic_res_t res;
-        memset(&res, 0, sizeof(res));
+
         if (db_register_user(db, req.username, pass_hash) == 0) {
             res.code = RES_SUCCESS;
             strcpy(res.message, "User registered successfully");
