@@ -1,9 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -I. $(shell mysql_config --cflags)
-LDFLAGS = $(shell mysql_config --libs) -lcrypt
-
-# when we add threds, we will need -lpthread
-# LDFLAGS += -lpthread
+LDFLAGS = $(shell mysql_config --libs) -lcrypt -lpthread
 
 SRCS = server.c db.c
 OBJS = $(SRCS:.c=.o)

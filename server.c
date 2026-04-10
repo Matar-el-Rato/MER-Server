@@ -5,6 +5,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>   // ntohl() - convert network byte order to host order
+#include <pthread.h>     // pthreads for live-connection threads
 #include <errno.h>
 #include <signal.h>
 #include <ctype.h>
@@ -19,6 +21,33 @@
 static int sock_listen_fd = -1;
 static db_t *db_ptr = NULL;
 
+/* =============================================================
+ * SHARED STATE: connected live clients
+ * =============================================================
+ * g_clients[] is accessed by multiple pthreads simultaneously:
+ *   - The main accept() thread calls add_client() for every new
+ *     REQ_CONNECT_LIVE connection.
+ *   - Each handle_live_connection() thread calls remove_client()
+ *     when its client disconnects.
+ *   - Both paths call broadcast_user_list(), which iterates the
+ *     entire array and writes to every client's socket.
+ *
+ * WHY MUTUAL EXCLUSION IS NEEDED:
+ * Without the mutex, two threads doing concurrent swap-removals
+ * can both read the same g_client_count, write to the same slot,
+ * and decrement twice — leaving the array corrupted and the count
+ * wrong. Similarly, a broadcast iterating g_clients[0..count-1]
+ * while another thread is removing an entry mid-loop could read a
+ * stale socket_fd that has already been closed (and potentially
+ * reused by the OS for a different connection).
+ *
+ * ALL reads and writes to g_clients[] and g_client_count MUST
+ * hold g_clients_mutex. No exceptions.
+ * ============================================================= */
+static connected_client_t g_clients[MAX_CLIENTS];
+static int                g_client_count = 0;
+static pthread_mutex_t    g_clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static void handle_shutdown(int sig) {
     (void)sig;
     write(1, "\nShutting down...\n", 18);
@@ -32,7 +61,218 @@ void error(const char *msg) {
     exit(1);
 }
 
-// Function to handle a single client
+/* =============================================================
+ * broadcast_user_list
+ *
+ * PRECONDITION: g_clients_mutex MUST already be held by the caller.
+ * This function does NOT lock/unlock by itself.
+ *
+ * WHY THE LOCK MUST BE HELD FOR THE ENTIRE SEND LOOP:
+ * If we released the mutex after building the message and then
+ * looped over socket fds, remove_client() could run on another
+ * thread between two send() calls. That thread would call
+ * close(fd) on the departing client's socket. If the OS reuses
+ * that fd number for a brand-new unrelated connection before our
+ * send() reaches it, we would write a stale user-list packet into
+ * an innocent socket. Holding the lock for the full loop prevents
+ * close(fd) — and therefore OS fd reuse — from happening while
+ * we are mid-broadcast.
+ *
+ * SEND FAILURE HANDLING:
+ * If send() fails for one client (socket already broken), we log
+ * and continue. A failed send must not abort the broadcast for
+ * other healthy clients. The dead connection will call
+ * remove_client() itself when its recv() loop wakes up.
+ * We MUST NOT call remove_client() from here — we already hold
+ * the mutex and would deadlock.
+ * ============================================================= */
+static void broadcast_user_list(void) {
+    user_list_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.type  = MSG_USER_LIST;
+    msg.count = (uint8_t)g_client_count;
+
+    for (int i = 0; i < g_client_count; i++) {
+        strncpy(msg.users[i], g_clients[i].username, MAX_USERNAME - 1);
+        /* [MAX_USERNAME-1] is already '\0' from the memset above */
+    }
+
+    for (int i = 0; i < g_client_count; i++) {
+        /* MSG_NOSIGNAL: do not raise SIGPIPE if the remote end has closed.
+         * We also call signal(SIGPIPE, SIG_IGN) in main() as belt-and-
+         * suspenders, but MSG_NOSIGNAL is the per-call explicit guard. */
+        ssize_t sent = send(g_clients[i].socket_fd, &msg, sizeof(msg), MSG_NOSIGNAL);
+        if (sent < 0) {
+            char log[160];
+            snprintf(log, sizeof(log),
+                "[broadcast] send() failed for '%s' (fd=%d): %s"
+                " - will be cleaned up on disconnect\n",
+                g_clients[i].username, g_clients[i].socket_fd, strerror(errno));
+            write(1, log, strlen(log));
+            /* Do NOT call remove_client() here — we hold the mutex; that would deadlock. */
+        }
+    }
+}
+
+/* =============================================================
+ * add_client
+ *
+ * Adds a new live client to the global table and triggers a
+ * broadcast so all clients receive the updated list immediately.
+ *
+ * MUTUAL EXCLUSION: acquires g_clients_mutex.
+ * The insert and the broadcast are performed under the same lock
+ * so no other thread can observe a state where the new client
+ * is missing from a broadcast that should include it.
+ *
+ * RISK - server at capacity:
+ * If MAX_CLIENTS is reached, the new client is rejected cleanly.
+ * Its socket is closed by the caller (handle_live_connection).
+ * ============================================================= */
+static int add_client(int fd, const char *username, int user_id) {
+    pthread_mutex_lock(&g_clients_mutex);
+
+    if (g_client_count >= MAX_CLIENTS) {
+        pthread_mutex_unlock(&g_clients_mutex);
+        char log[128];
+        snprintf(log, sizeof(log),
+            "[add_client] MAX_CLIENTS (%d) reached, rejecting fd=%d user='%s'\n",
+            MAX_CLIENTS, fd, username);
+        write(1, log, strlen(log));
+        return -1;
+    }
+
+    g_clients[g_client_count].socket_fd = fd;
+    strncpy(g_clients[g_client_count].username, username, MAX_USERNAME - 1);
+    g_clients[g_client_count].username[MAX_USERNAME - 1] = '\0';
+    g_clients[g_client_count].user_id = user_id;
+    g_client_count++;
+
+    char log[128];
+    snprintf(log, sizeof(log),
+        "[connect] '%s' (id=%d) joined. Active clients: %d\n",
+        username, user_id, g_client_count);
+    write(1, log, strlen(log));
+
+    broadcast_user_list(); /* called with mutex already held — see precondition */
+
+    pthread_mutex_unlock(&g_clients_mutex);
+    return 0;
+}
+
+/* =============================================================
+ * remove_client
+ *
+ * Removes a client by socket fd using O(1) swap-removal, then
+ * broadcasts the updated list to all remaining clients.
+ *
+ * MUTUAL EXCLUSION: acquires g_clients_mutex.
+ * Same reasoning as add_client: the removal and the broadcast
+ * must be atomic from other threads' perspective, so no thread
+ * can receive a list that still contains a client we just removed.
+ * ============================================================= */
+static void remove_client(int fd) {
+    pthread_mutex_lock(&g_clients_mutex);
+
+    for (int i = 0; i < g_client_count; i++) {
+        if (g_clients[i].socket_fd == fd) {
+            char log[128];
+            snprintf(log, sizeof(log),
+                "[disconnect] '%s' left. Active clients: %d\n",
+                g_clients[i].username, g_client_count - 1);
+            write(1, log, strlen(log));
+
+            /* O(1) swap-removal: overwrite this slot with the last entry,
+             * then shrink the array. Order does not matter. */
+            g_clients[i] = g_clients[g_client_count - 1];
+            g_client_count--;
+
+            broadcast_user_list(); /* called with mutex already held */
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&g_clients_mutex);
+}
+
+/* =============================================================
+ * handle_live_connection  (pthread entry point)
+ *
+ * Reads the REQ_CONNECT_LIVE handshake (the type byte was already
+ * consumed by the dispatch loop in main before this thread was
+ * spawned), registers the client, then blocks in a recv() loop
+ * until the client disconnects. On exit it unregisters and closes.
+ *
+ * PARTIAL READ RISK:
+ * TCP is a stream protocol. A single send() on the client may
+ * arrive as multiple recv() calls on the server. We therefore
+ * read the handshake payload in a loop until all expected bytes
+ * have arrived, rather than assuming one recv() = one packet.
+ *
+ * ENDIANNESS:
+ * user_id is transmitted in network byte order (big-endian) by
+ * the C# client (IPAddress.HostToNetworkOrder). We call ntohl()
+ * to convert to host byte order before storing.
+ *
+ * HEARTBEAT LIMITATION (known, accepted for this version):
+ * If the remote host disappears without sending a TCP FIN (e.g.
+ * power loss, abrupt cable pull), recv() will block indefinitely
+ * until the OS TCP keep-alive timeout fires, which is disabled by
+ * default and can be ~2 hours. For production, enable SO_KEEPALIVE
+ * on the socket or implement an application-level ping/pong.
+ * ============================================================= */
+static void *handle_live_connection(void *arg) {
+    int fd = (int)(intptr_t)arg;
+
+    /* Read the rest of connect_live_req_t in a loop.
+     * The type byte (1 byte) was already consumed in main(). */
+    connect_live_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.type = REQ_CONNECT_LIVE; /* already consumed by caller */
+
+    size_t  to_read  = sizeof(connect_live_req_t) - sizeof(uint8_t);
+    size_t  received = 0;
+    char   *buf      = (char *)&req + sizeof(uint8_t);
+
+    while (received < to_read) {
+        ssize_t n = recv(fd, buf + received, to_read - received, 0);
+        if (n <= 0) {
+            /* Client disconnected or errored before handshake completed */
+            close(fd);
+            return NULL;
+        }
+        received += (size_t)n;
+    }
+
+    req.username[MAX_USERNAME - 1] = '\0'; /* guarantee null termination */
+
+    /* Convert user_id from network byte order to host byte order */
+    int user_id = (int)ntohl(req.user_id);
+
+    if (add_client(fd, req.username, user_id) != 0) {
+        /* Server was at capacity — reject and close */
+        close(fd);
+        return NULL;
+    }
+
+    /* Block waiting for the client to disconnect.
+     * This channel is server-push only in this version; we do not
+     * expect meaningful data from the client. Any bytes received are
+     * drained and discarded. recv() returning 0 means clean TCP close;
+     * -1 means error. Both exit the loop. */
+    char drain[64];
+    while (1) {
+        ssize_t n = recv(fd, drain, sizeof(drain), 0);
+        if (n <= 0) break;
+        /* Future: this is where incoming chat/ping messages would be parsed */
+    }
+
+    remove_client(fd);
+    close(fd);
+    return NULL;
+}
+
+// Function to handle a single client (stateless request/response)
 void handle_client(int sock_conn, db_t *db) {
     uint8_t req_type;
     int ret;
@@ -164,7 +404,6 @@ void handle_client(int sock_conn, db_t *db) {
         */
     }
 
-
     close(sock_conn);
 }
 
@@ -176,6 +415,14 @@ int main(int argc, char *argv[]) {
 
     signal(SIGINT,  handle_shutdown);
     signal(SIGTERM, handle_shutdown);
+
+    /* Ignore SIGPIPE globally.
+     * When a live client drops its connection, any subsequent write/send
+     * to its socket would raise SIGPIPE, which terminates the process by
+     * default. We use MSG_NOSIGNAL in broadcast_user_list() as a per-call
+     * guard, but this global ignore is belt-and-suspenders for any other
+     * write paths that may be added in the future. */
+    signal(SIGPIPE, SIG_IGN);
 
     // Initialize Database
     if (!db_init(&db, "localhost", "admin", "admin", "matarelrato-db")) {
@@ -216,20 +463,48 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        /* 
-           FUTURE MULTI-THREADING HOOK (STATIC MEMORY VERSION):
-           Instead of calling handle_client directly, we would do:
-           
-           static int socket_pool[MAX_THREADS];
-           // Find an empty slot in socket_pool, copy sock_conn there,
-           // and pass the pointer to the thread.
-           
-           pthread_t tid;
-           pthread_create(&tid, NULL, handle_client_thread, &socket_pool[i]);
-        */
+        /* Peek at the first byte to determine the request type without
+         * consuming it. This lets handle_client() read the type byte
+         * itself as before (no change to stateless path). Only the live
+         * connection branch explicitly consumes the byte before handing
+         * the socket off to the new thread. */
+        uint8_t req_type;
+        ssize_t peeked = recv(sock_conn, &req_type, sizeof(req_type), MSG_PEEK);
+        if (peeked <= 0) {
+            close(sock_conn);
+            continue;
+        }
 
-        // Current single-threaded handling
-        handle_client(sock_conn, &db);
+        if (req_type == REQ_CONNECT_LIVE) {
+            /* Consume the type byte — handle_live_connection expects it gone */
+            recv(sock_conn, &req_type, sizeof(req_type), 0);
+
+            pthread_t tid;
+            int rc = pthread_create(&tid, NULL, handle_live_connection,
+                                    (void *)(intptr_t)sock_conn);
+            if (rc != 0) {
+                /* RISK: pthread_create failure.
+                 * We must close the socket here to avoid a file descriptor
+                 * leak. The client will receive a TCP RST and can retry. */
+                char log[128];
+                snprintf(log, sizeof(log),
+                    "[error] pthread_create failed for fd=%d: %s\n",
+                    sock_conn, strerror(rc));
+                write(1, log, strlen(log));
+                close(sock_conn);
+                continue;
+            }
+
+            /* Detach the thread so it frees its own resources on exit.
+             * We never pthread_join() live-connection threads. */
+            pthread_detach(tid);
+
+        } else {
+            /* Stateless request: handle synchronously on this thread.
+             * handle_client() will read the type byte itself via read().
+             * The socket is closed inside handle_client() after the response. */
+            handle_client(sock_conn, &db);
+        }
     }
 
     // Clean up
