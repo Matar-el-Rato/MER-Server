@@ -11,12 +11,24 @@
 #include <signal.h>
 #include <ctype.h>
 #include <crypt.h>
+#include <time.h>
 #include "protocol.h"
 #include "db.h"
 
 #define SALT "$6$matar_el_rato$" // SHA-512 Salt
 
 #define DEFAULT_PORT 8888
+
+/* Writes "[HH:MM:SS] " followed by msg to stdout.
+ * Used for all server log lines so every entry carries an absolute timestamp. */
+static void tlog(const char *msg) {
+    time_t     now = time(NULL);
+    struct tm *tm  = localtime(&now);
+    char       ts[16];
+    strftime(ts, sizeof(ts), "[%H:%M:%S] ", tm);
+    write(1, ts,  strlen(ts));
+    write(1, msg, strlen(msg));
+}
 
 static int sock_listen_fd = -1;
 static db_t *db_ptr = NULL;
@@ -50,7 +62,7 @@ static pthread_mutex_t    g_clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void handle_shutdown(int sig) {
     (void)sig;
-    write(1, "\nShutting down...\n", 18);
+    tlog("\nShutting down...\n");
     if (sock_listen_fd != -1) close(sock_listen_fd);
     if (db_ptr != NULL) db_close(db_ptr);
     exit(0);
@@ -108,7 +120,7 @@ static void broadcast_user_list(void) {
                 "[broadcast] send() failed for '%s' (fd=%d): %s"
                 " - will be cleaned up on disconnect\n",
                 g_clients[i].username, g_clients[i].socket_fd, strerror(errno));
-            write(1, log, strlen(log));
+            tlog(log);
             /* Do NOT call remove_client() here — we hold the mutex; that would deadlock. */
         }
     }
@@ -138,7 +150,7 @@ static int add_client(int fd, const char *username, int user_id) {
         snprintf(log, sizeof(log),
             "[add_client] MAX_CLIENTS (%d) reached, rejecting fd=%d user='%s'\n",
             MAX_CLIENTS, fd, username);
-        write(1, log, strlen(log));
+        tlog(log);
         return -1;
     }
 
@@ -152,7 +164,7 @@ static int add_client(int fd, const char *username, int user_id) {
     snprintf(log, sizeof(log),
         "[connect] '%s' (id=%d) joined. Active clients: %d\n",
         username, user_id, g_client_count);
-    write(1, log, strlen(log));
+    tlog(log);
 
     broadcast_user_list(); /* called with mutex already held — see precondition */
 
@@ -180,7 +192,7 @@ static void remove_client(int fd) {
             snprintf(log, sizeof(log),
                 "[disconnect] '%s' left. Active clients: %d\n",
                 g_clients[i].username, g_client_count - 1);
-            write(1, log, strlen(log));
+            tlog(log);
 
             /* O(1) swap-removal: overwrite this slot with the last entry,
              * then shrink the array. Order does not matter. */
@@ -313,7 +325,7 @@ void handle_client(int sock_conn, db_t *db) {
 
         char log_msg[256];
         sprintf(log_msg, "Register request for user: %s\n", req.username);
-        write(1, log_msg, strlen(log_msg));
+        tlog(log_msg);
 
         // Hash the password before storing
         char *pass_hash = crypt(req.password, SALT);
@@ -333,7 +345,7 @@ void handle_client(int sock_conn, db_t *db) {
 
         char log_msg[256];
         sprintf(log_msg, "Login request for user: %s\n", req.username);
-        write(1, log_msg, strlen(log_msg));
+        tlog(log_msg);
 
         // Hash the incoming password with the same salt to compare
         char *pass_hash = crypt(req.password, SALT);
@@ -355,7 +367,7 @@ void handle_client(int sock_conn, db_t *db) {
 
         char log_msg[256];
         sprintf(log_msg, "Change skin request: User ID %d -> Skin ID %d\n", req.user_id, req.skin_id);
-        write(1, log_msg, strlen(log_msg));
+        tlog(log_msg);
 
         generic_res_t res;
         memset(&res, 0, sizeof(res));
@@ -429,7 +441,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed to connect to database\n");
         exit(1);
     }
-    printf("Connected to database successfully.\n");
+    tlog("Connected to database successfully.\n");
     db_ptr = &db;
 
     // 1. Create Socket (System Call)
@@ -452,7 +464,7 @@ int main(int argc, char *argv[]) {
 
     char start_msg[128];
     sprintf(start_msg, "Server listening on port %d...\n", port);
-    write(1, start_msg, strlen(start_msg));
+    tlog(start_msg);
 
     for (;;) {
         // 4. Accept (System Call)
@@ -490,7 +502,7 @@ int main(int argc, char *argv[]) {
                 snprintf(log, sizeof(log),
                     "[error] pthread_create failed for fd=%d: %s\n",
                     sock_conn, strerror(rc));
-                write(1, log, strlen(log));
+                tlog(log);
                 close(sock_conn);
                 continue;
             }
