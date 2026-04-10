@@ -362,6 +362,9 @@ void handle_client(int sock_conn, db_t *db) {
         if (db_authenticate_user(db, req.username, pass_hash, &user_id, &skin_id) == 0) {
             res.code = RES_SUCCESS;
             sprintf(res.message, "Login successful. Welcome ID %d SKIN %d", user_id, skin_id);
+            char skin_log[128];
+            snprintf(skin_log, sizeof(skin_log), "[login] user_id=%d skin_id=%d\n", user_id, skin_id);
+            tlog(skin_log);
         } else {
             res.code = RES_ERR_INVALID_CREDENTIALS;
             strcpy(res.message, "Invalid credentials");
@@ -378,6 +381,12 @@ void handle_client(int sock_conn, db_t *db) {
         generic_res_t res;
         memset(&res, 0, sizeof(res));
         if (db_update_skin(db, req.user_id, req.skin_id) == 0) {
+            unsigned long long affected = mysql_affected_rows(db->conn);
+            char ok_log[128];
+            snprintf(ok_log, sizeof(ok_log),
+                "[skin] updated user_id=%d skin_id=%d (rows affected: %llu)\n",
+                req.user_id, req.skin_id, affected);
+            tlog(ok_log);
             res.code = RES_SUCCESS;
             strcpy(res.message, "Skin updated successfully");
         } else {
