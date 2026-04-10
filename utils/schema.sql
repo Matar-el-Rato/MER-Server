@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS `users` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
     `username` VARCHAR(50) NOT NULL UNIQUE,
     `password_hash` VARCHAR(256) NOT NULL,
-    `skin_id` INT DEFAULT 0,
+    `skin_id` INT DEFAULT 101,
     `points` INT DEFAULT 0,
     `created_at` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;

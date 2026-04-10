@@ -356,12 +356,12 @@ void handle_client(int sock_conn, db_t *db) {
         // Hash the incoming password with the same salt to compare
         char *pass_hash = crypt(req.password, SALT);
 
-        int user_id;
+        int user_id, skin_id;
         generic_res_t res;
         memset(&res, 0, sizeof(res));
-        if (db_authenticate_user(db, req.username, pass_hash, &user_id) == 0) {
+        if (db_authenticate_user(db, req.username, pass_hash, &user_id, &skin_id) == 0) {
             res.code = RES_SUCCESS;
-            sprintf(res.message, "Login successful. Welcome ID %d", user_id);
+            sprintf(res.message, "Login successful. Welcome ID %d SKIN %d", user_id, skin_id);
         } else {
             res.code = RES_ERR_INVALID_CREDENTIALS;
             strcpy(res.message, "Invalid credentials");
@@ -381,6 +381,10 @@ void handle_client(int sock_conn, db_t *db) {
             res.code = RES_SUCCESS;
             strcpy(res.message, "Skin updated successfully");
         } else {
+            char err_log[128];
+            snprintf(err_log, sizeof(err_log),
+                "[skin] db_update_skin FAILED for user_id=%d\n", req.user_id);
+            tlog(err_log);
             res.code = RES_ERR_DATABASE;
             strcpy(res.message, "Failed to update skin");
         }

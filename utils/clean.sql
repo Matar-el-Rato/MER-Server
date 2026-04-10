@@ -20,4 +20,4 @@ UPDATE rooms SET current_players = 0;
 -- Re-enabling foreign key checks
 SET FOREIGN_KEY_CHECKS = 1;
 
-INSERT INTO users (username, password_hash, skin_id) VALUES ('admin', 'admin', 0);
+INSERT INTO users (username, password_hash, skin_id) VALUES ('admin', 'admin', 101);

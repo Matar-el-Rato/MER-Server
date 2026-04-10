@@ -38,10 +38,11 @@ int db_register_user(db_t *db, const char *username, const char *password_hash) 
     return 0;
 }
 
-int db_authenticate_user(db_t *db, const char *username, const char *password_hash, int *user_id) {
+int db_authenticate_user(db_t *db, const char *username, const char *password_hash, int *user_id, int *skin_id) {
     char query[1024];
-    snprintf(query, sizeof(query), 
-             "SELECT id FROM users WHERE username='%s' AND password_hash='%s'", 
+    /* COALESCE returns 101 (default skin) when skin_id is NULL (new accounts). */
+    snprintf(query, sizeof(query),
+             "SELECT id, COALESCE(skin_id, 101) FROM users WHERE username='%s' AND password_hash='%s'",
              username, password_hash);
 
     if (mysql_query(db->conn, query)) {
@@ -55,8 +56,9 @@ int db_authenticate_user(db_t *db, const char *username, const char *password_ha
     MYSQL_ROW row = mysql_fetch_row(res);
     int status = -1;
     if (row) {
-        *user_id = atoi(row[0]);
-        status = 0; // Success
+        *user_id  = atoi(row[0]);
+        *skin_id  = atoi(row[1]);
+        status = 0;
     }
 
     mysql_free_result(res);
