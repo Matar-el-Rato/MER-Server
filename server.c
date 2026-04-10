@@ -109,11 +109,17 @@ static void broadcast_user_list(void) {
         /* [MAX_USERNAME-1] is already '\0' from the memset above */
     }
 
+    /* Send only the header (2 bytes) plus the occupied name slots.
+     * sizeof(msg) is always 770 bytes (fixed struct), but the client reads
+     * exactly 2 + count*MAX_USERNAME bytes. Sending the full struct would
+     * leave trailing zero-bytes in the stream that corrupt the next read. */
+    size_t send_size = sizeof(uint8_t) * 2 + (size_t)g_client_count * MAX_USERNAME;
+
     for (int i = 0; i < g_client_count; i++) {
         /* MSG_NOSIGNAL: do not raise SIGPIPE if the remote end has closed.
          * We also call signal(SIGPIPE, SIG_IGN) in main() as belt-and-
          * suspenders, but MSG_NOSIGNAL is the per-call explicit guard. */
-        ssize_t sent = send(g_clients[i].socket_fd, &msg, sizeof(msg), MSG_NOSIGNAL);
+        ssize_t sent = send(g_clients[i].socket_fd, &msg, send_size, MSG_NOSIGNAL);
         if (sent < 0) {
             char log[160];
             snprintf(log, sizeof(log),
