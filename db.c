@@ -9,6 +9,9 @@ bool db_init(db_t *db, const char *host, const char *user, const char *pass, con
         return false;
     }
 
+    bool reconnect = true;
+    mysql_options(db->conn, MYSQL_OPT_RECONNECT, &reconnect);
+
     if (mysql_real_connect(db->conn, host, user, pass, dbname, 0, NULL, 0) == NULL) {
         fprintf(stderr, "mysql_real_connect() failed: %s\n", mysql_error(db->conn));
         mysql_close(db->conn);
@@ -25,6 +28,7 @@ void db_close(db_t *db) {
 }
 
 int db_register_user(db_t *db, const char *username, const char *password_hash) {
+    mysql_ping(db->conn);
     char query[1024];
     snprintf(query, sizeof(query), 
              "INSERT INTO users (username, password_hash) VALUES ('%s', '%s')", 
@@ -39,6 +43,7 @@ int db_register_user(db_t *db, const char *username, const char *password_hash) 
 }
 
 int db_authenticate_user(db_t *db, const char *username, const char *password_hash, int *user_id, int *skin_id) {
+    mysql_ping(db->conn);
     char query[1024];
     /* COALESCE returns 101 (default skin) when skin_id is NULL (new accounts). */
     snprintf(query, sizeof(query),
@@ -66,6 +71,7 @@ int db_authenticate_user(db_t *db, const char *username, const char *password_ha
 }
 
 int db_update_skin(db_t *db, int user_id, int skin_id) {
+    mysql_ping(db->conn);
     char query[512];
     snprintf(query, sizeof(query), 
              "UPDATE users SET skin_id=%d WHERE id=%d", 
