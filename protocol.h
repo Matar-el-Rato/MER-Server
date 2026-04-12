@@ -2,6 +2,7 @@
 #define PROTOCOL_H
 
 #include <stdint.h>
+#include <pthread.h>
 
 #define MAX_USERNAME 12
 #define MAX_PASSWORD 12
@@ -86,5 +87,14 @@ typedef struct {
     char username[MAX_USERNAME];
     int  user_id;
 } connected_client_t;
+
+// List of currently connected live clients, protected by a mutex.
+typedef struct {
+    connected_client_t entries[MAX_CLIENTS];
+    int                count;
+    pthread_mutex_t    mutex;
+} client_list_t;
+
+#define CLIENT_LIST_INIT { .count = 0, .mutex = PTHREAD_MUTEX_INITIALIZER }
 
 #endif // PROTOCOL_H

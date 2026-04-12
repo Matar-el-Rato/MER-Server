@@ -36,29 +36,27 @@ static db_t *db_ptr = NULL;
 /* =============================================================
  * SHARED STATE: connected live clients
  * =============================================================
- * g_clients[] is accessed by multiple pthreads simultaneously:
+ * g_live is accessed by multiple pthreads simultaneously:
  *   - The main accept() thread calls add_client() for every new
  *     REQ_CONNECT_LIVE connection.
  *   - Each handle_live_connection() thread calls remove_client()
  *     when its client disconnects.
  *   - Both paths call broadcast_user_list(), which iterates the
- *     entire array and writes to every client's socket.
+ *     entire list and writes to every client's socket.
  *
  * WHY MUTUAL EXCLUSION IS NEEDED:
  * Without the mutex, two threads doing concurrent swap-removals
- * can both read the same g_client_count, write to the same slot,
- * and decrement twice — leaving the array corrupted and the count
- * wrong. Similarly, a broadcast iterating g_clients[0..count-1]
+ * can both read the same count, write to the same slot,
+ * and decrement twice — leaving the list corrupted and the count
+ * wrong. Similarly, a broadcast iterating entries[0..count-1]
  * while another thread is removing an entry mid-loop could read a
  * stale socket_fd that has already been closed (and potentially
  * reused by the OS for a different connection).
  *
- * ALL reads and writes to g_clients[] and g_client_count MUST
- * hold g_clients_mutex. No exceptions.
+ * ALL reads and writes to g_live MUST hold g_live.mutex.
+ * No exceptions.
  * ============================================================= */
-static connected_client_t g_clients[MAX_CLIENTS];
-static int                g_client_count = 0;
-static pthread_mutex_t    g_clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+static client_list_t g_live = CLIENT_LIST_INIT;
 
 static void handle_shutdown(int sig) {
     (void)sig;
@@ -76,7 +74,7 @@ void error(const char *msg) {
 /* =============================================================
  * broadcast_user_list
  *
- * PRECONDITION: g_clients_mutex MUST already be held by the caller.
+ * PRECONDITION: g_live.mutex MUST already be held by the caller.
  * This function does NOT lock/unlock by itself.
  *
  * WHY THE LOCK MUST BE HELD FOR THE ENTIRE SEND LOOP:
@@ -102,32 +100,23 @@ static void broadcast_user_list(void) {
     user_list_msg_t msg;
     memset(&msg, 0, sizeof(msg));
     msg.type  = MSG_USER_LIST;
-    msg.count = (uint8_t)g_client_count;
+    msg.count = (uint8_t)g_live.count;
 
-    for (int i = 0; i < g_client_count; i++) {
-        strncpy(msg.users[i], g_clients[i].username, MAX_USERNAME - 1);
-        /* [MAX_USERNAME-1] is already '\0' from the memset above */
+    for (int i = 0; i < g_live.count; i++) {
+        strncpy(msg.users[i], g_live.entries[i].username, MAX_USERNAME - 1);
     }
 
-    /* Send only the header (2 bytes) plus the occupied name slots.
-     * sizeof(msg) is always 770 bytes (fixed struct), but the client reads
-     * exactly 2 + count*MAX_USERNAME bytes. Sending the full struct would
-     * leave trailing zero-bytes in the stream that corrupt the next read. */
-    size_t send_size = sizeof(uint8_t) * 2 + (size_t)g_client_count * MAX_USERNAME;
+    size_t send_size = sizeof(uint8_t) * 2 + (size_t)g_live.count * MAX_USERNAME;
 
-    for (int i = 0; i < g_client_count; i++) {
-        /* MSG_NOSIGNAL: do not raise SIGPIPE if the remote end has closed.
-         * We also call signal(SIGPIPE, SIG_IGN) in main() as belt-and-
-         * suspenders, but MSG_NOSIGNAL is the per-call explicit guard. */
-        ssize_t sent = send(g_clients[i].socket_fd, &msg, send_size, MSG_NOSIGNAL);
+    for (int i = 0; i < g_live.count; i++) {
+        ssize_t sent = send(g_live.entries[i].socket_fd, &msg, send_size, MSG_NOSIGNAL);
         if (sent < 0) {
             char log[160];
             snprintf(log, sizeof(log),
                 "[broadcast] send() failed for '%s' (fd=%d): %s"
                 " - will be cleaned up on disconnect\n",
-                g_clients[i].username, g_clients[i].socket_fd, strerror(errno));
+                g_live.entries[i].username, g_live.entries[i].socket_fd, strerror(errno));
             tlog(log);
-            /* Do NOT call remove_client() here — we hold the mutex; that would deadlock. */
         }
     }
 }
@@ -135,10 +124,10 @@ static void broadcast_user_list(void) {
 /* =============================================================
  * add_client
  *
- * Adds a new live client to the global table and triggers a
- * broadcast so all clients receive the updated list immediately.
+ * Adds a new live client to g_live and triggers a broadcast so
+ * all clients receive the updated list immediately.
  *
- * MUTUAL EXCLUSION: acquires g_clients_mutex.
+ * MUTUAL EXCLUSION: acquires g_live.mutex.
  * The insert and the broadcast are performed under the same lock
  * so no other thread can observe a state where the new client
  * is missing from a broadcast that should include it.
@@ -148,10 +137,10 @@ static void broadcast_user_list(void) {
  * Its socket is closed by the caller (handle_live_connection).
  * ============================================================= */
 static int add_client(int fd, const char *username, int user_id) {
-    pthread_mutex_lock(&g_clients_mutex);
+    pthread_mutex_lock(&g_live.mutex);
 
-    if (g_client_count >= MAX_CLIENTS) {
-        pthread_mutex_unlock(&g_clients_mutex);
+    if (g_live.count >= MAX_CLIENTS) {
+        pthread_mutex_unlock(&g_live.mutex);
         char log[128];
         snprintf(log, sizeof(log),
             "[add_client] MAX_CLIENTS (%d) reached, rejecting fd=%d user='%s'\n",
@@ -160,21 +149,21 @@ static int add_client(int fd, const char *username, int user_id) {
         return -1;
     }
 
-    g_clients[g_client_count].socket_fd = fd;
-    strncpy(g_clients[g_client_count].username, username, MAX_USERNAME - 1);
-    g_clients[g_client_count].username[MAX_USERNAME - 1] = '\0';
-    g_clients[g_client_count].user_id = user_id;
-    g_client_count++;
+    g_live.entries[g_live.count].socket_fd = fd;
+    strncpy(g_live.entries[g_live.count].username, username, MAX_USERNAME - 1);
+    g_live.entries[g_live.count].username[MAX_USERNAME - 1] = '\0';
+    g_live.entries[g_live.count].user_id = user_id;
+    g_live.count++;
 
     char log[128];
     snprintf(log, sizeof(log),
         "[connect] '%s' (id=%d) joined. Active clients: %d\n",
-        username, user_id, g_client_count);
+        username, user_id, g_live.count);
     tlog(log);
 
-    broadcast_user_list(); /* called with mutex already held — see precondition */
+    broadcast_user_list(); /* called with mutex already held */
 
-    pthread_mutex_unlock(&g_clients_mutex);
+    pthread_mutex_unlock(&g_live.mutex);
     return 0;
 }
 
@@ -184,33 +173,33 @@ static int add_client(int fd, const char *username, int user_id) {
  * Removes a client by socket fd using O(1) swap-removal, then
  * broadcasts the updated list to all remaining clients.
  *
- * MUTUAL EXCLUSION: acquires g_clients_mutex.
+ * MUTUAL EXCLUSION: acquires g_live.mutex.
  * Same reasoning as add_client: the removal and the broadcast
  * must be atomic from other threads' perspective, so no thread
  * can receive a list that still contains a client we just removed.
  * ============================================================= */
 static void remove_client(int fd) {
-    pthread_mutex_lock(&g_clients_mutex);
+    pthread_mutex_lock(&g_live.mutex);
 
-    for (int i = 0; i < g_client_count; i++) {
-        if (g_clients[i].socket_fd == fd) {
+    for (int i = 0; i < g_live.count; i++) {
+        if (g_live.entries[i].socket_fd == fd) {
             char log[128];
             snprintf(log, sizeof(log),
                 "[disconnect] '%s' left. Active clients: %d\n",
-                g_clients[i].username, g_client_count - 1);
+                g_live.entries[i].username, g_live.count - 1);
             tlog(log);
 
             /* O(1) swap-removal: overwrite this slot with the last entry,
-             * then shrink the array. Order does not matter. */
-            g_clients[i] = g_clients[g_client_count - 1];
-            g_client_count--;
+             * then shrink the list. Order does not matter. */
+            g_live.entries[i] = g_live.entries[g_live.count - 1];
+            g_live.count--;
 
             broadcast_user_list(); /* called with mutex already held */
             break;
         }
     }
 
-    pthread_mutex_unlock(&g_clients_mutex);
+    pthread_mutex_unlock(&g_live.mutex);
 }
 
 /* =============================================================
