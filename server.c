@@ -122,6 +122,39 @@ static void broadcast_user_list(void) {
 }
 
 /* =============================================================
+ * broadcast_chat
+ *
+ * Pushes a MSG_CHAT packet to all currently connected live clients.
+ * Acquires g_live.mutex internally — caller must NOT already hold it.
+ *
+ * WHY THIS ACQUIRES ITS OWN LOCK (unlike broadcast_user_list):
+ * broadcast_user_list is called by add_client/remove_client which
+ * already hold the mutex, so it must not re-acquire it. broadcast_chat
+ * is called from handle_live_connection (the per-client recv loop),
+ * which holds no lock — so this function acquires it itself.
+ * ============================================================= */
+static void broadcast_chat(const char *username, const char *message) {
+    chat_broadcast_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.type = MSG_CHAT;
+    strncpy(msg.username, username, MAX_USERNAME - 1);
+    strncpy(msg.message,  message,  MAX_CHAT_MESSAGE - 1);
+
+    pthread_mutex_lock(&g_live.mutex);
+    for (int i = 0; i < g_live.count; i++) {
+        ssize_t sent = send(g_live.entries[i].socket_fd, &msg, sizeof(msg), MSG_NOSIGNAL);
+        if (sent < 0) {
+            char log[160];
+            snprintf(log, sizeof(log),
+                "[chat] send() failed for '%s' (fd=%d): %s\n",
+                g_live.entries[i].username, g_live.entries[i].socket_fd, strerror(errno));
+            tlog(log);
+        }
+    }
+    pthread_mutex_unlock(&g_live.mutex);
+}
+
+/* =============================================================
  * add_client
  *
  * Adds a new live client to g_live and triggers a broadcast so
@@ -262,16 +295,54 @@ static void *handle_live_connection(void *arg) {
         return NULL;
     }
 
-    /* Block waiting for the client to disconnect.
-     * This channel is server-push only in this version; we do not
-     * expect meaningful data from the client. Any bytes received are
-     * drained and discarded. recv() returning 0 means clean TCP close;
-     * -1 means error. Both exit the loop. */
-    char drain[64];
+    /* Message loop: read and dispatch incoming packets from this client.
+     * Each iteration reads one type byte then the fixed-size payload for
+     * that packet type. Unknown types are logged and skipped (zero payload
+     * assumed — add an explicit drain if new variable-length types are added). */
+    uint8_t msg_type;
     while (1) {
-        ssize_t n = recv(fd, drain, sizeof(drain), 0);
+        ssize_t n = recv(fd, &msg_type, 1, 0);
         if (n <= 0) break;
-        /* Future: this is where incoming chat/ping messages would be parsed */
+
+        if (msg_type == REQ_SEND_CHAT) {
+            /* Lobby chat: read 100-byte message body. */
+            char message[MAX_CHAT_MESSAGE];
+            memset(message, 0, sizeof(message));
+
+            size_t received = 0;
+            int    ok       = 1;
+            while (received < MAX_CHAT_MESSAGE) {
+                ssize_t r = recv(fd, message + received, MAX_CHAT_MESSAGE - received, 0);
+                if (r <= 0) { ok = 0; break; }
+                received += (size_t)r;
+            }
+            if (!ok) break;
+
+            message[MAX_CHAT_MESSAGE - 1] = '\0';
+
+            /* Sanitize: replace non-printable characters with a space. */
+            for (int i = 0; message[i] != '\0' && i < MAX_CHAT_MESSAGE - 1; i++) {
+                if (!isprint((unsigned char)message[i]))
+                    message[i] = ' ';
+            }
+
+            char log_msg[160];
+            snprintf(log_msg, sizeof(log_msg), "[chat] %s: %.100s\n", req.username, message);
+            tlog(log_msg);
+
+            broadcast_chat(req.username, message);
+
+            /* TODO: Per-room chat — when room support exists, route messages
+             * whose sender is in a room only to that room's participants. */
+
+        } else {
+            /* Unknown message type from client — log and continue. */
+            char log_msg[64];
+            snprintf(log_msg, sizeof(log_msg),
+                "[live] unknown msg_type=%d from '%s', ignoring\n",
+                (int)msg_type, req.username);
+            tlog(log_msg);
+        }
     }
 
     remove_client(fd);
@@ -405,14 +476,11 @@ void handle_client(int sock_conn, db_t *db) {
         */
 
     } else if (req_type == REQ_SEND_CHAT) {
-        /*
-           REQ_SEND_CHAT
-           1. Parse message and optional `room_id`.
-           2. Insert into `chat_messages` table.
-           3. ROUTING LOGIC:
-              - If room_id is NULL/0: Broadcast to all connected clients WHO ARE NOT in a room.
-              - If room_id is NOT 0: Broadcast ONLY to clients who are match_participants in that room.
-        */
+        /* Lobby chat is handled on the persistent live connection (handle_live_connection),
+         * not through the stateless request path.
+         *
+         * TODO: Per-room chat — when rooms exist, consider whether room messages
+         * should also travel over the live connection or use this stateless path. */
 
     } else if (req_type == REQ_GAME_ACTION) {
         /*

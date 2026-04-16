@@ -4,9 +4,10 @@
 #include <stdint.h>
 #include <pthread.h>
 
-#define MAX_USERNAME 12
-#define MAX_PASSWORD 12
-#define MAX_CLIENTS  64
+#define MAX_USERNAME     12
+#define MAX_PASSWORD     12
+#define MAX_CLIENTS      64
+#define MAX_CHAT_MESSAGE 100
 
 // Request Types
 typedef enum {
@@ -23,7 +24,8 @@ typedef enum {
 
 // Push Message Types (server -> client, unsolicited)
 typedef enum {
-    MSG_USER_LIST = 10  // Broadcast: full list of currently connected live clients
+    MSG_USER_LIST = 10, // Broadcast: full list of currently connected live clients
+    MSG_CHAT      = 11  // Broadcast: chat message from a player
 } push_msg_type_t;
 
 // Response Codes
@@ -80,6 +82,21 @@ typedef struct __attribute__((packed)) {
     uint8_t count;                           // number of entries in users[]
     char    users[MAX_CLIENTS][MAX_USERNAME]; // each entry zero-padded to MAX_USERNAME bytes
 } user_list_msg_t;
+
+// Sent by the client on the live connection to send a lobby chat message.
+// packed: no padding after type byte. Wire size: 1 + 100 = 101 bytes.
+typedef struct __attribute__((packed)) {
+    uint8_t type;                       // REQ_SEND_CHAT
+    char    message[MAX_CHAT_MESSAGE];  // null-terminated, max 100 chars
+} chat_msg_req_t;
+
+// Pushed by the server to ALL live clients when a player sends a message.
+// packed: no padding. Wire size: 1 + 12 + 100 = 113 bytes.
+typedef struct __attribute__((packed)) {
+    uint8_t type;                       // MSG_CHAT
+    char    username[MAX_USERNAME];     // sender username, zero-padded
+    char    message[MAX_CHAT_MESSAGE];  // message text, zero-padded
+} chat_broadcast_t;
 
 // Entry in the server's live connected-client table (internal use, not transmitted).
 typedef struct {
