@@ -108,6 +108,12 @@ static void broadcast_user_list(void) {
 
     size_t send_size = sizeof(uint8_t) * 2 + (size_t)g_live.count * MAX_USERNAME;
 
+    char list_log[160];
+    snprintf(list_log, sizeof(list_log),
+        "[broadcast] sending user list (%d players) to %d client(s)\n",
+        g_live.count, g_live.count);
+    tlog(list_log);
+
     for (int i = 0; i < g_live.count; i++) {
         ssize_t sent = send(g_live.entries[i].socket_fd, &msg, send_size, MSG_NOSIGNAL);
         if (sent < 0) {
@@ -141,6 +147,13 @@ static void broadcast_chat(const char *username, const char *message) {
     strncpy(msg.message,  message,  MAX_CHAT_MESSAGE - 1);
 
     pthread_mutex_lock(&g_live.mutex);
+
+    char chat_log[256];
+    snprintf(chat_log, sizeof(chat_log),
+        "[chat] broadcasting '%s' from '%s' to %d client(s)\n",
+        message, username, g_live.count);
+    tlog(chat_log);
+
     for (int i = 0; i < g_live.count; i++) {
         ssize_t sent = send(g_live.entries[i].socket_fd, &msg, sizeof(msg), MSG_NOSIGNAL);
         if (sent < 0) {
