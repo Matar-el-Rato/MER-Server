@@ -24,9 +24,13 @@ typedef enum {
 
 // Push Message Types (server -> client, unsolicited)
 typedef enum {
-    MSG_USER_LIST = 10, // Broadcast: full list of currently connected live clients
-    MSG_CHAT      = 11  // Broadcast: chat message from a player
+    MSG_USER_LIST  = 10, // Broadcast: full list of currently connected live clients
+    MSG_CHAT       = 11, // Broadcast: chat message from a player (scoped to sender's room)
+    MSG_ROOM_STATE = 12  // Broadcast: current occupancy of one room (sent to all live clients)
 } push_msg_type_t;
+
+#define NUM_ROOMS        3
+#define MAX_ROOM_PLAYERS 4
 
 // Response Codes
 typedef enum {
@@ -98,11 +102,28 @@ typedef struct __attribute__((packed)) {
     char    message[MAX_CHAT_MESSAGE];  // message text, zero-padded
 } chat_broadcast_t;
 
+// Pushed by the server to ALL live clients when a room's membership changes.
+// packed: no padding. Wire size: 1 + 1 + 1 + 4*12 = 51 bytes.
+typedef struct __attribute__((packed)) {
+    uint8_t type;                                    // MSG_ROOM_STATE
+    uint8_t room_id;                                 // 1-3
+    uint8_t count;                                   // number of occupied slots
+    char    players[MAX_ROOM_PLAYERS][MAX_USERNAME]; // zero-padded names
+} room_state_msg_t;
+
+// Sent by the client on the live connection to join a room.
+// packed. Wire size: 2 bytes.
+typedef struct __attribute__((packed)) {
+    uint8_t type;    // REQ_JOIN_ROOM
+    uint8_t room_id; // 1-3
+} join_room_req_t;
+
 // Entry in the server's live connected-client table (internal use, not transmitted).
 typedef struct {
     int  socket_fd;
     char username[MAX_USERNAME];
     int  user_id;
+    int  room_id; // 0 = lobby, 1-3 = room
 } connected_client_t;
 
 // List of currently connected live clients, protected by a mutex.

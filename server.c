@@ -139,7 +139,54 @@ static void broadcast_user_list(void) {
  * is called from handle_live_connection (the per-client recv loop),
  * which holds no lock — so this function acquires it itself.
  * ============================================================= */
+/* =============================================================
+ * broadcast_room_state
+ *
+ * PRECONDITION: g_live.mutex MUST already be held by the caller.
+ * Sends MSG_ROOM_STATE for the given room_id to ALL live clients.
+ * ============================================================= */
+static void broadcast_room_state(int room_id) {
+    room_state_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.type    = MSG_ROOM_STATE;
+    msg.room_id = (uint8_t)room_id;
+    msg.count   = 0;
+
+    for (int i = 0; i < g_live.count; i++) {
+        if (g_live.entries[i].room_id == room_id && msg.count < MAX_ROOM_PLAYERS) {
+            strncpy(msg.players[msg.count], g_live.entries[i].username, MAX_USERNAME - 1);
+            msg.count++;
+        }
+    }
+
+    char log[128];
+    snprintf(log, sizeof(log), "[room] broadcasting room %d state (%d player(s))\n",
+        room_id, (int)msg.count);
+    tlog(log);
+
+    for (int i = 0; i < g_live.count; i++) {
+        ssize_t sent = send(g_live.entries[i].socket_fd, &msg, sizeof(msg), MSG_NOSIGNAL);
+        if (sent < 0) {
+            char elog[128];
+            snprintf(elog, sizeof(elog), "[room] send() failed for '%s': %s\n",
+                g_live.entries[i].username, strerror(errno));
+            tlog(elog);
+        }
+    }
+}
+
+/* =============================================================
+ * broadcast_chat_from_fd
+ *
+ * Routes a MSG_CHAT packet only to clients in the same room as
+ * the sender (0 = lobby). Acquires g_live.mutex internally.
+ * ============================================================= */
 static void broadcast_chat(const char *username, const char *message) {
+    /* caller passes this only for the old lobby-only path; replaced below */
+    (void)username; (void)message;
+}
+
+static void broadcast_chat_from_fd(int sender_fd, const char *username, const char *message) {
     chat_broadcast_t msg;
     memset(&msg, 0, sizeof(msg));
     msg.type = MSG_CHAT;
@@ -148,13 +195,23 @@ static void broadcast_chat(const char *username, const char *message) {
 
     pthread_mutex_lock(&g_live.mutex);
 
+    /* Find sender's room (0 = lobby). */
+    int sender_room = 0;
+    for (int i = 0; i < g_live.count; i++) {
+        if (g_live.entries[i].socket_fd == sender_fd) {
+            sender_room = g_live.entries[i].room_id;
+            break;
+        }
+    }
+
     char chat_log[256];
     snprintf(chat_log, sizeof(chat_log),
-        "[chat] broadcasting '%s' from '%s' to %d client(s)\n",
-        message, username, g_live.count);
+        "[chat] room=%d '%s' from '%s'\n", sender_room, message, username);
     tlog(chat_log);
 
+    /* Route: send only to clients in the same room (lobby→lobby, room→room). */
     for (int i = 0; i < g_live.count; i++) {
+        if (g_live.entries[i].room_id != sender_room) continue;
         ssize_t sent = send(g_live.entries[i].socket_fd, &msg, sizeof(msg), MSG_NOSIGNAL);
         if (sent < 0) {
             char log[160];
@@ -198,7 +255,8 @@ static int add_client(int fd, const char *username, int user_id) {
     g_live.entries[g_live.count].socket_fd = fd;
     strncpy(g_live.entries[g_live.count].username, username, MAX_USERNAME - 1);
     g_live.entries[g_live.count].username[MAX_USERNAME - 1] = '\0';
-    g_live.entries[g_live.count].user_id = user_id;
+    g_live.entries[g_live.count].user_id  = user_id;
+    g_live.entries[g_live.count].room_id  = 0;
     g_live.count++;
 
     char log[128];
@@ -229,18 +287,21 @@ static void remove_client(int fd) {
 
     for (int i = 0; i < g_live.count; i++) {
         if (g_live.entries[i].socket_fd == fd) {
+            int was_in_room = g_live.entries[i].room_id;
+
             char log[128];
             snprintf(log, sizeof(log),
                 "[disconnect] '%s' left. Active clients: %d\n",
                 g_live.entries[i].username, g_live.count - 1);
             tlog(log);
 
-            /* O(1) swap-removal: overwrite this slot with the last entry,
-             * then shrink the list. Order does not matter. */
+            /* O(1) swap-removal */
             g_live.entries[i] = g_live.entries[g_live.count - 1];
             g_live.count--;
 
             broadcast_user_list(); /* called with mutex already held */
+            if (was_in_room != 0)
+                broadcast_room_state(was_in_room); /* notify all that room changed */
             break;
         }
     }
@@ -318,7 +379,6 @@ static void *handle_live_connection(void *arg) {
         if (n <= 0) break;
 
         if (msg_type == REQ_SEND_CHAT) {
-            /* Lobby chat: read 100-byte message body. */
             char message[MAX_CHAT_MESSAGE];
             memset(message, 0, sizeof(message));
 
@@ -332,24 +392,70 @@ static void *handle_live_connection(void *arg) {
             if (!ok) break;
 
             message[MAX_CHAT_MESSAGE - 1] = '\0';
-
-            /* Sanitize: replace non-printable characters with a space. */
             for (int i = 0; message[i] != '\0' && i < MAX_CHAT_MESSAGE - 1; i++) {
                 if (!isprint((unsigned char)message[i]))
                     message[i] = ' ';
             }
 
-            char log_msg[160];
-            snprintf(log_msg, sizeof(log_msg), "[chat] %s: %.100s\n", req.username, message);
-            tlog(log_msg);
+            /* Route chat only to clients in the same room (or lobby). */
+            broadcast_chat_from_fd(fd, req.username, message);
 
-            broadcast_chat(req.username, message);
+        } else if (msg_type == REQ_JOIN_ROOM) {
+            uint8_t room_id = 0;
+            ssize_t r = recv(fd, &room_id, 1, 0);
+            if (r <= 0) break;
 
-            /* TODO: Per-room chat — when room support exists, route messages
-             * whose sender is in a room only to that room's participants. */
+            if (room_id < 1 || room_id > NUM_ROOMS) continue;
+
+            pthread_mutex_lock(&g_live.mutex);
+
+            int client_idx = -1;
+            int room_count = 0;
+            for (int i = 0; i < g_live.count; i++) {
+                if (g_live.entries[i].socket_fd == fd)         client_idx = i;
+                if (g_live.entries[i].room_id   == (int)room_id) room_count++;
+            }
+
+            if (client_idx == -1) {
+                pthread_mutex_unlock(&g_live.mutex);
+                break;
+            }
+
+            if (room_count < MAX_ROOM_PLAYERS) {
+                int old_room = g_live.entries[client_idx].room_id;
+                g_live.entries[client_idx].room_id = (int)room_id;
+
+                char log_msg[128];
+                snprintf(log_msg, sizeof(log_msg),
+                    "[room] '%s' joined room %d\n", req.username, (int)room_id);
+                tlog(log_msg);
+
+                if (old_room != 0 && old_room != (int)room_id)
+                    broadcast_room_state(old_room);
+                broadcast_room_state((int)room_id);
+            }
+            pthread_mutex_unlock(&g_live.mutex);
+
+        } else if (msg_type == REQ_LEAVE_ROOM) {
+            pthread_mutex_lock(&g_live.mutex);
+
+            for (int i = 0; i < g_live.count; i++) {
+                if (g_live.entries[i].socket_fd == fd && g_live.entries[i].room_id != 0) {
+                    int old_room = g_live.entries[i].room_id;
+                    g_live.entries[i].room_id = 0;
+
+                    char log_msg[128];
+                    snprintf(log_msg, sizeof(log_msg),
+                        "[room] '%s' left room %d\n", req.username, old_room);
+                    tlog(log_msg);
+
+                    broadcast_room_state(old_room);
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&g_live.mutex);
 
         } else {
-            /* Unknown message type from client — log and continue. */
             char log_msg[64];
             snprintf(log_msg, sizeof(log_msg),
                 "[live] unknown msg_type=%d from '%s', ignoring\n",
