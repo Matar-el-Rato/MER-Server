@@ -262,6 +262,11 @@ static int add_client(int fd, const char *username, int user_id) {
 
     broadcast_user_list(); /* called with mutex already held */
 
+    /* Also push current occupancy for all rooms so the new client sees
+     * who is already in each room without waiting for a join/leave event. */
+    for (int r = 1; r <= NUM_ROOMS; r++)
+        broadcast_room_state(r);
+
     pthread_mutex_unlock(&g_live.mutex);
     return 0;
 }
