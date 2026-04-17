@@ -181,11 +181,6 @@ static void broadcast_room_state(int room_id) {
  * Routes a MSG_CHAT packet only to clients in the same room as
  * the sender (0 = lobby). Acquires g_live.mutex internally.
  * ============================================================= */
-static void broadcast_chat(const char *username, const char *message) {
-    /* caller passes this only for the old lobby-only path; replaced below */
-    (void)username; (void)message;
-}
-
 static void broadcast_chat_from_fd(int sender_fd, const char *username, const char *message) {
     chat_broadcast_t msg;
     memset(&msg, 0, sizeof(msg));
