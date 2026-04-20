@@ -586,14 +586,6 @@ void handle_client(int sock_conn, db_t *db) {
             strcpy(res.message, "Failed to update skin");
         }
         write(sock_conn, &res, sizeof(res));
-    } else if (req_type == REQ_LIST_ROOMS) {
-        /*
-           REQ_LIST_ROOMS
-           1. Query the `rooms` table for all room IDs and player counts.
-           2. Format the results into a packet containing tuples of (room_id, current, max).
-           3. Send to client to populate the "Room Browser" UI.
-        */
-
     } else if (req_type == REQ_JOIN_ROOM) {
         /*
            REQ_JOIN_ROOM

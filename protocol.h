@@ -14,11 +14,10 @@ typedef enum {
     REQ_REGISTER     = 1,
     REQ_LOGIN        = 2,
     REQ_CHANGE_SKIN  = 3, // Update user skin ID
-    REQ_LIST_ROOMS   = 4, // Future: Get list of active rooms
-    REQ_JOIN_ROOM    = 5, // Future: Join a specific room
-    REQ_SEND_CHAT    = 6, // Future: Send message (Lobby or Room)
+    REQ_JOIN_ROOM    = 5,
+    REQ_SEND_CHAT    = 6,
     REQ_GAME_ACTION  = 7, // Future: Perform game move
-    REQ_LEAVE_ROOM   = 8, // Future: Exit a room back to Lobby
+    REQ_LEAVE_ROOM   = 8,
     REQ_CONNECT_LIVE = 9, // Open a persistent connection for server-push notifications
     REQ_LOGOUT       = 13 // Graceful logout: server removes client and closes connection
 } request_type_t;
