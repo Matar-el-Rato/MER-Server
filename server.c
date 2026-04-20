@@ -348,6 +348,8 @@ static void *handle_live_connection(void *arg) {
     size_t  received = 0;
     char   *buf      = (char *)&req + sizeof(uint8_t);
 
+    /* Loop until we've read the full payload, on good connections most definetely wont be an issue
+    *  but on a somewhat slow or unstable connection we might need to read in multiple chunks */
     while (received < to_read) {
         ssize_t n = recv(fd, buf + received, to_read - received, 0);
         if (n <= 0) {
@@ -454,6 +456,13 @@ static void *handle_live_connection(void *arg) {
                 }
             }
             pthread_mutex_unlock(&g_live.mutex);
+
+        } else if (msg_type == REQ_LOGOUT) {
+            char log_msg[128];
+            snprintf(log_msg, sizeof(log_msg),
+                "[logout] '%s' logged out gracefully\n", req.username);
+            tlog(log_msg);
+            break; /* exit loop → remove_client + close below */
 
         } else {
             char log_msg[64];
@@ -643,6 +652,12 @@ int main(int argc, char *argv[]) {
     if ((sock_listen = socket(AF_INET, SOCK_STREAM, 0)) < 0)
         error("Error creant socket");
     sock_listen_fd = sock_listen;
+
+    // Allow immediate reuse of the port after restart.
+    // Without this, the OS keeps the port in TIME_WAIT for ~60s and
+    // bind() fails with "Address already in use" on quick restarts.
+    int opt = 1;
+    setsockopt(sock_listen, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     // 2. Bind (System Call)
     memset(&serv_adr, 0, sizeof(serv_adr));

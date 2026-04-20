@@ -19,7 +19,8 @@ typedef enum {
     REQ_SEND_CHAT    = 6, // Future: Send message (Lobby or Room)
     REQ_GAME_ACTION  = 7, // Future: Perform game move
     REQ_LEAVE_ROOM   = 8, // Future: Exit a room back to Lobby
-    REQ_CONNECT_LIVE = 9  // Open a persistent connection for server-push notifications
+    REQ_CONNECT_LIVE = 9, // Open a persistent connection for server-push notifications
+    REQ_LOGOUT       = 13 // Graceful logout: server removes client and closes connection
 } request_type_t;
 
 // Push Message Types (server -> client, unsolicited)
