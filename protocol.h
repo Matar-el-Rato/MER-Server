@@ -20,7 +20,8 @@ typedef enum {
     REQ_GAME_ACTION  = 7, // Future: Perform game move
     REQ_LEAVE_ROOM   = 8,
     REQ_CONNECT_LIVE = 9, // Open a persistent connection for server-push notifications
-    REQ_READY        = 13 // Signal player is ready to start; server starts countdown when all room members ready
+    REQ_READY        = 13, // Signal player is ready to start; server starts countdown when all room members ready
+    REQ_UNREADY      = 16  // Cancel ready state before the countdown begins
 } request_type_t;
 
 // Push Message Types (server -> client, unsolicited)

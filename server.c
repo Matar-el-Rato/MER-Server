@@ -644,6 +644,25 @@ static void *handle_live_connection(void *arg) {
 
             pthread_mutex_unlock(&g_live.mutex);
 
+        } else if (msg_type == REQ_UNREADY) {
+            pthread_mutex_lock(&g_live.mutex);
+
+            for (int i = 0; i < g_live.count; i++) {
+                if (g_live.entries[i].socket_fd == fd) {
+                    if (g_live.entries[i].ready) {
+                        g_live.entries[i].ready = 0;
+                        char log_msg[128];
+                        snprintf(log_msg, sizeof(log_msg),
+                            "[ready] '%s' cancelled ready in room %d\n",
+                            req.username, g_live.entries[i].room_id);
+                        tlog(log_msg);
+                    }
+                    break;
+                }
+            }
+
+            pthread_mutex_unlock(&g_live.mutex);
+
         } else if (msg_type == REQ_LOGOUT) {
             char log_msg[128];
             snprintf(log_msg, sizeof(log_msg),
