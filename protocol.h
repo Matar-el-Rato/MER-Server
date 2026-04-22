@@ -19,14 +19,17 @@ typedef enum {
     REQ_SEND_CHAT    = 6,
     REQ_GAME_ACTION  = 7, // Future: Perform game move
     REQ_LEAVE_ROOM   = 8,
-    REQ_CONNECT_LIVE = 9 // Open a persistent connection for server-push notifications
+    REQ_CONNECT_LIVE = 9, // Open a persistent connection for server-push notifications
+    REQ_READY        = 13 // Signal player is ready to start; server starts countdown when all room members ready
 } request_type_t;
 
 // Push Message Types (server -> client, unsolicited)
 typedef enum {
     MSG_USER_LIST  = 10, // Broadcast: full list of currently connected live clients
     MSG_CHAT       = 11, // Broadcast: chat message from a player (scoped to sender's room)
-    MSG_ROOM_STATE = 12  // Broadcast: current occupancy of one room (sent to all live clients)
+    MSG_ROOM_STATE = 12, // Broadcast: current occupancy of one room (sent to all live clients)
+    MSG_COUNTDOWN  = 14, // Broadcast: countdown tick before game start; payload: room_id(1B) + seconds(1B)
+    MSG_GAME_START = 15  // Broadcast: game is starting now; payload: room_id(1B)
 } push_msg_type_t;
 
 #define NUM_ROOMS        3
@@ -124,6 +127,7 @@ typedef struct {
     char username[MAX_USERNAME];
     int  user_id;
     int  room_id; // 0 = lobby, 1-3 = room
+    int  ready;   // 1 if this client has sent REQ_READY, 0 otherwise
 } connected_client_t;
 
 // List of currently connected live clients, protected by a mutex.

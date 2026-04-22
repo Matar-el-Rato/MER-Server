@@ -58,6 +58,21 @@ static db_t *db_ptr = NULL;
  * ============================================================= */
 static client_list_t g_live = CLIENT_LIST_INIT;
 
+/* Per-room countdown-in-progress flag. Prevents spawning a second countdown
+ * thread if all-ready fires again (e.g. due to a race). Protected by g_live.mutex. */
+static int g_countdown_started[NUM_ROOMS + 1] = {0};
+
+/* match_id of the currently active (PLAYING) match per room. 0 = none.
+ * Protected by g_live.mutex. Set by countdown_thread after DB insert;
+ * cleared and cancelled by remove_client / REQ_LEAVE_ROOM when room empties. */
+static int g_active_match[NUM_ROOMS + 1] = {0};
+
+/* Serialises all db_* calls made from background threads.
+ * The main-thread handle_client path is serialised by the accept() loop
+ * and does not need this mutex — but any live-connection thread that calls
+ * a db_* function must hold g_db_mutex for the duration of the call. */
+static pthread_mutex_t g_db_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static void handle_shutdown(int sig) {
     (void)sig;
     tlog("\nShutting down...\n");
@@ -252,6 +267,7 @@ static int add_client(int fd, const char *username, int user_id) {
     g_live.entries[g_live.count].username[MAX_USERNAME - 1] = '\0';
     g_live.entries[g_live.count].user_id  = user_id;
     g_live.entries[g_live.count].room_id  = 0;
+    g_live.entries[g_live.count].ready    = 0;
     g_live.count++;
 
     char log[128];
@@ -283,11 +299,14 @@ static int add_client(int fd, const char *username, int user_id) {
  * can receive a list that still contains a client we just removed.
  * ============================================================= */
 static void remove_client(int fd) {
+    int was_in_room  = 0;
+    int cancel_match = 0;
+
     pthread_mutex_lock(&g_live.mutex);
 
     for (int i = 0; i < g_live.count; i++) {
         if (g_live.entries[i].socket_fd == fd) {
-            int was_in_room = g_live.entries[i].room_id;
+            was_in_room = g_live.entries[i].room_id;
 
             char log[128];
             snprintf(log, sizeof(log),
@@ -299,14 +318,34 @@ static void remove_client(int fd) {
             g_live.entries[i] = g_live.entries[g_live.count - 1];
             g_live.count--;
 
-            broadcast_user_list(); /* called with mutex already held */
-            if (was_in_room != 0)
-                broadcast_room_state(was_in_room); /* notify all that room changed */
+            broadcast_user_list();
+            if (was_in_room != 0) {
+                broadcast_room_state(was_in_room);
+                /* Check if the room is now empty with an active match. */
+                int room_empty = 1;
+                for (int j = 0; j < g_live.count; j++)
+                    if (g_live.entries[j].room_id == was_in_room) { room_empty = 0; break; }
+                if (room_empty && g_active_match[was_in_room]) {
+                    cancel_match = g_active_match[was_in_room];
+                    g_active_match[was_in_room] = 0;
+                }
+            }
             break;
         }
     }
 
     pthread_mutex_unlock(&g_live.mutex);
+
+    if (cancel_match) {
+        pthread_mutex_lock(&g_db_mutex);
+        db_cancel_match(db_ptr, cancel_match);
+        pthread_mutex_unlock(&g_db_mutex);
+        char log[80];
+        snprintf(log, sizeof(log),
+            "[match] room %d: match %d CANCELLED (room empty on disconnect)\n",
+            was_in_room, cancel_match);
+        tlog(log);
+    }
 }
 
 /* =============================================================
@@ -335,6 +374,87 @@ static void remove_client(int fd) {
  * default and can be ~2 hours. For production, enable SO_KEEPALIVE
  * on the socket or implement an application-level ping/pong.
  * ============================================================= */
+/* =============================================================
+ * countdown_thread  (pthread entry point)
+ *
+ * Broadcasts MSG_COUNTDOWN (room_id + seconds) to all live clients
+ * once per second for 10 seconds, then broadcasts MSG_GAME_START.
+ * After completion resets ready flags and the countdown-started guard
+ * for the room so a new game can be set up.
+ *
+ * The arg is a heap-allocated int containing the room_id; this thread
+ * frees it before doing any work so it won't leak even if we return early.
+ * ============================================================= */
+typedef struct { int room_id; } countdown_arg_t;
+
+static void *countdown_thread(void *arg) {
+    countdown_arg_t *ca = (countdown_arg_t *)arg;
+    int room_id = ca->room_id;
+    free(ca);
+
+    for (int secs = 10; secs >= 1; secs--) {
+        uint8_t pkt[3] = { MSG_COUNTDOWN, (uint8_t)room_id, (uint8_t)secs };
+        pthread_mutex_lock(&g_live.mutex);
+        for (int i = 0; i < g_live.count; i++)
+            send(g_live.entries[i].socket_fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+        pthread_mutex_unlock(&g_live.mutex);
+        sleep(1);
+    }
+
+    /* ── Game start: collect participants, then broadcast ────────────────── */
+    int user_ids[MAX_ROOM_PLAYERS];
+    int p_count = 0;
+
+    pthread_mutex_lock(&g_live.mutex);
+
+    for (int i = 0; i < g_live.count && p_count < MAX_ROOM_PLAYERS; i++)
+        if (g_live.entries[i].room_id == room_id)
+            user_ids[p_count++] = g_live.entries[i].user_id;
+
+    if (p_count < 2) {
+        /* Players left during countdown — abort silently. */
+        g_countdown_started[room_id] = 0;
+        pthread_mutex_unlock(&g_live.mutex);
+        char log[80];
+        snprintf(log, sizeof(log),
+            "[game] room %d: countdown aborted (only %d player(s) remain)\n", room_id, p_count);
+        tlog(log);
+        return NULL;
+    }
+
+    uint8_t gspkt[2] = { MSG_GAME_START, (uint8_t)room_id };
+    for (int i = 0; i < g_live.count; i++)
+        send(g_live.entries[i].socket_fd, gspkt, sizeof(gspkt), MSG_NOSIGNAL);
+    for (int i = 0; i < g_live.count; i++)
+        if (g_live.entries[i].room_id == room_id)
+            g_live.entries[i].ready = 0;
+    g_countdown_started[room_id] = 0;
+
+    pthread_mutex_unlock(&g_live.mutex);
+
+    /* ── DB: create and start the match record ───────────────────────────── */
+    pthread_mutex_lock(&g_db_mutex);
+    int match_id = db_create_match(db_ptr, room_id);
+    if (match_id > 0) {
+        db_add_participants(db_ptr, match_id, user_ids, p_count);
+        db_start_match(db_ptr, match_id);
+    }
+    pthread_mutex_unlock(&g_db_mutex);
+
+    if (match_id > 0) {
+        pthread_mutex_lock(&g_live.mutex);
+        g_active_match[room_id] = match_id;
+        pthread_mutex_unlock(&g_live.mutex);
+
+        char log[80];
+        snprintf(log, sizeof(log),
+            "[match] room %d: match %d PLAYING (%d players)\n", room_id, match_id, p_count);
+        tlog(log);
+    }
+
+    return NULL;
+}
+
 static void *handle_live_connection(void *arg) {
     int fd = (int)(intptr_t)arg;
 
@@ -439,22 +559,89 @@ static void *handle_live_connection(void *arg) {
             pthread_mutex_unlock(&g_live.mutex);
 
         } else if (msg_type == REQ_LEAVE_ROOM) {
+            int left_room    = 0;
+            int cancel_match = 0;
+
             pthread_mutex_lock(&g_live.mutex);
 
             for (int i = 0; i < g_live.count; i++) {
                 if (g_live.entries[i].socket_fd == fd && g_live.entries[i].room_id != 0) {
-                    int old_room = g_live.entries[i].room_id;
+                    left_room = g_live.entries[i].room_id;
                     g_live.entries[i].room_id = 0;
+                    g_live.entries[i].ready   = 0;
 
                     char log_msg[128];
                     snprintf(log_msg, sizeof(log_msg),
-                        "[room] '%s' left room %d\n", req.username, old_room);
+                        "[room] '%s' left room %d\n", req.username, left_room);
                     tlog(log_msg);
 
-                    broadcast_room_state(old_room);
+                    broadcast_room_state(left_room);
+
+                    /* Check if the room is now empty with an active match. */
+                    int room_empty = 1;
+                    for (int j = 0; j < g_live.count; j++)
+                        if (g_live.entries[j].room_id == left_room) { room_empty = 0; break; }
+                    if (room_empty && g_active_match[left_room]) {
+                        cancel_match = g_active_match[left_room];
+                        g_active_match[left_room] = 0;
+                    }
                     break;
                 }
             }
+            pthread_mutex_unlock(&g_live.mutex);
+
+            if (cancel_match) {
+                pthread_mutex_lock(&g_db_mutex);
+                db_cancel_match(db_ptr, cancel_match);
+                pthread_mutex_unlock(&g_db_mutex);
+                char log_msg[80];
+                snprintf(log_msg, sizeof(log_msg),
+                    "[match] room %d: match %d CANCELLED (room empty on leave)\n",
+                    left_room, cancel_match);
+                tlog(log_msg);
+            }
+
+        } else if (msg_type == REQ_READY) {
+            pthread_mutex_lock(&g_live.mutex);
+
+            int client_room = 0;
+            for (int i = 0; i < g_live.count; i++) {
+                if (g_live.entries[i].socket_fd == fd) {
+                    g_live.entries[i].ready = 1;
+                    client_room = g_live.entries[i].room_id;
+                    break;
+                }
+            }
+
+            if (client_room != 0) {
+                int room_count = 0, ready_count = 0;
+                for (int i = 0; i < g_live.count; i++) {
+                    if (g_live.entries[i].room_id == client_room) {
+                        room_count++;
+                        if (g_live.entries[i].ready) ready_count++;
+                    }
+                }
+
+                char log_msg[128];
+                snprintf(log_msg, sizeof(log_msg),
+                    "[ready] '%s' room %d: %d/%d ready\n",
+                    req.username, client_room, ready_count, room_count);
+                tlog(log_msg);
+
+                if (ready_count == room_count && room_count >= 2 && !g_countdown_started[client_room]) {
+                    g_countdown_started[client_room] = 1;
+                    countdown_arg_t *carg = malloc(sizeof(*carg));
+                    carg->room_id = client_room;
+                    pthread_t tid;
+                    if (pthread_create(&tid, NULL, countdown_thread, carg) == 0) {
+                        pthread_detach(tid);
+                    } else {
+                        free(carg);
+                        g_countdown_started[client_room] = 0;
+                    }
+                }
+            }
+
             pthread_mutex_unlock(&g_live.mutex);
 
         } else if (msg_type == REQ_LOGOUT) {

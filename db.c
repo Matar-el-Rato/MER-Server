@@ -73,8 +73,8 @@ int db_authenticate_user(db_t *db, const char *username, const char *password_ha
 int db_update_skin(db_t *db, int user_id, int skin_id) {
     mysql_ping(db->conn);
     char query[512];
-    snprintf(query, sizeof(query), 
-             "UPDATE users SET skin_id=%d WHERE id=%d", 
+    snprintf(query, sizeof(query),
+             "UPDATE users SET skin_id=%d WHERE id=%d",
              skin_id, user_id);
 
     if (mysql_query(db->conn, query)) {
@@ -82,5 +82,57 @@ int db_update_skin(db_t *db, int user_id, int skin_id) {
         return -1;
     }
 
+    return 0;
+}
+
+int db_create_match(db_t *db, int room_id) {
+    mysql_ping(db->conn);
+    char query[256];
+    snprintf(query, sizeof(query),
+        "INSERT INTO matches (room_id, status) VALUES (%d, 'WAITING')", room_id);
+    if (mysql_query(db->conn, query)) {
+        fprintf(stderr, "db_create_match error: %s\n", mysql_error(db->conn));
+        return -1;
+    }
+    return (int)mysql_insert_id(db->conn);
+}
+
+int db_add_participants(db_t *db, int match_id, int *user_ids, int count) {
+    mysql_ping(db->conn);
+    for (int i = 0; i < count; i++) {
+        char query[256];
+        snprintf(query, sizeof(query),
+            "INSERT INTO match_participants (match_id, user_id, turn_order) VALUES (%d, %d, %d)",
+            match_id, user_ids[i], i);
+        if (mysql_query(db->conn, query))
+            fprintf(stderr, "db_add_participants error (user_id=%d): %s\n",
+                user_ids[i], mysql_error(db->conn));
+    }
+    return 0;
+}
+
+int db_start_match(db_t *db, int match_id) {
+    mysql_ping(db->conn);
+    char query[256];
+    snprintf(query, sizeof(query),
+        "UPDATE matches SET status='PLAYING', start_time=NOW() WHERE id=%d", match_id);
+    if (mysql_query(db->conn, query)) {
+        fprintf(stderr, "db_start_match error: %s\n", mysql_error(db->conn));
+        return -1;
+    }
+    return 0;
+}
+
+int db_cancel_match(db_t *db, int match_id) {
+    mysql_ping(db->conn);
+    char query[256];
+    snprintf(query, sizeof(query),
+        "UPDATE matches SET status='CANCELLED', end_time=NOW()"
+        " WHERE id=%d AND status IN ('WAITING','PLAYING')",
+        match_id);
+    if (mysql_query(db->conn, query)) {
+        fprintf(stderr, "db_cancel_match error: %s\n", mysql_error(db->conn));
+        return -1;
+    }
     return 0;
 }
