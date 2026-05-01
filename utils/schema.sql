@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS `match_participants` (
     `match_id` INT NOT NULL,
     `user_id` INT NOT NULL,
     `turn_order` INT NOT NULL,
+    `chair_color` VARCHAR(10) DEFAULT NULL,
     `finish_position` INT DEFAULT NULL,
     PRIMARY KEY (`match_id`, `user_id`),
     FOREIGN KEY (`match_id`) REFERENCES `matches`(`id`) ON DELETE CASCADE,

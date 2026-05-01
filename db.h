@@ -21,4 +21,9 @@ int db_add_participants(db_t *db, int match_id, int *user_ids, int count);      
 int db_start_match(db_t *db, int match_id);                                       /* status → PLAYING, start_time = NOW() */
 int db_cancel_match(db_t *db, int match_id);                                      /* status → CANCELLED, end_time = NOW() */
 
+/* Game actions */
+int db_set_chair(db_t *db, int match_id, int user_id, const char *color);        /* UPDATE match_participants SET chair_color */
+int db_log_event(db_t *db, int match_id, int user_id,
+                 const char *event_type, const char *event_data);                 /* INSERT match_events row */
+
 #endif // DB_H

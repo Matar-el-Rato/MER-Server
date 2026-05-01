@@ -136,3 +136,38 @@ int db_cancel_match(db_t *db, int match_id) {
     }
     return 0;
 }
+
+int db_set_chair(db_t *db, int match_id, int user_id, const char *color) {
+    mysql_ping(db->conn);
+    char escaped[32];
+    mysql_real_escape_string(db->conn, escaped, color, strlen(color));
+    char query[256];
+    snprintf(query, sizeof(query),
+        "UPDATE match_participants SET chair_color='%s'"
+        " WHERE match_id=%d AND user_id=%d",
+        escaped, match_id, user_id);
+    if (mysql_query(db->conn, query)) {
+        fprintf(stderr, "db_set_chair error: %s\n", mysql_error(db->conn));
+        return -1;
+    }
+    return 0;
+}
+
+int db_log_event(db_t *db, int match_id, int user_id,
+                 const char *event_type, const char *event_data) {
+    mysql_ping(db->conn);
+    char esc_type[64];
+    char esc_data[1024];
+    mysql_real_escape_string(db->conn, esc_type, event_type, strlen(event_type));
+    mysql_real_escape_string(db->conn, esc_data, event_data, strlen(event_data));
+    char query[1200];
+    snprintf(query, sizeof(query),
+        "INSERT INTO match_events (match_id, user_id, event_type, event_data)"
+        " VALUES (%d, %d, '%s', '%s')",
+        match_id, user_id, esc_type, esc_data);
+    if (mysql_query(db->conn, query)) {
+        fprintf(stderr, "db_log_event error: %s\n", mysql_error(db->conn));
+        return -1;
+    }
+    return 0;
+}

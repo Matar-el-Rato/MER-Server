@@ -26,11 +26,12 @@ typedef enum {
 
 // Push Message Types (server -> client, unsolicited)
 typedef enum {
-    MSG_USER_LIST  = 10, // Broadcast: full list of currently connected live clients
-    MSG_CHAT       = 11, // Broadcast: chat message from a player (scoped to sender's room)
-    MSG_ROOM_STATE = 12, // Broadcast: current occupancy of one room (sent to all live clients)
-    MSG_COUNTDOWN  = 14, // Broadcast: countdown tick before game start; payload: room_id(1B) + seconds(1B)
-    MSG_GAME_START = 15  // Broadcast: game is starting now; payload: room_id(1B)
+    MSG_USER_LIST   = 10, // Broadcast: full list of currently connected live clients
+    MSG_CHAT        = 11, // Broadcast: chat message from a player (scoped to sender's room)
+    MSG_ROOM_STATE  = 12, // Broadcast: current occupancy of one room (sent to all live clients)
+    MSG_COUNTDOWN   = 14, // Broadcast: countdown tick before game start; payload: room_id(1B) + seconds(1B)
+    MSG_GAME_START  = 15, // Broadcast: game is starting now; payload: match_id(4B BE) + player_count(1B)
+    MSG_GAME_ACTION = 17  // Broadcast: game action result; payload: json_len(2B BE) + json
 } push_msg_type_t;
 
 #define NUM_ROOMS        3

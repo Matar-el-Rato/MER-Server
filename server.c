@@ -14,6 +14,7 @@
 #include <time.h>
 #include "protocol.h"
 #include "db.h"
+#include "game_actions.h"
 
 #define SALT "$6$matar_el_rato$" // SHA-512 Salt
 
@@ -422,9 +423,7 @@ static void *countdown_thread(void *arg) {
         return NULL;
     }
 
-    uint8_t gspkt[2] = { MSG_GAME_START, (uint8_t)room_id };
-    for (int i = 0; i < g_live.count; i++)
-        send(g_live.entries[i].socket_fd, gspkt, sizeof(gspkt), MSG_NOSIGNAL);
+    /* Reset ready flags and countdown flag before releasing the lock. */
     for (int i = 0; i < g_live.count; i++)
         if (g_live.entries[i].room_id == room_id)
             g_live.entries[i].ready = 0;
@@ -441,16 +440,36 @@ static void *countdown_thread(void *arg) {
     }
     pthread_mutex_unlock(&g_db_mutex);
 
-    if (match_id > 0) {
-        pthread_mutex_lock(&g_live.mutex);
-        g_active_match[room_id] = match_id;
-        pthread_mutex_unlock(&g_live.mutex);
-
+    if (match_id <= 0) {
         char log[80];
         snprintf(log, sizeof(log),
-            "[match] room %d: match %d PLAYING (%d players)\n", room_id, match_id, p_count);
+            "[match] room %d: DB error — could not create match\n", room_id);
         tlog(log);
+        return NULL;
     }
+
+    /* ── Broadcast MSG_GAME_START to room clients and record active match ─── */
+    {
+        uint8_t  gspkt[6];
+        uint32_t be_mid = htonl((uint32_t)match_id);
+        gspkt[0] = MSG_GAME_START;
+        memcpy(&gspkt[1], &be_mid, 4);
+        gspkt[5] = (uint8_t)p_count;
+
+        pthread_mutex_lock(&g_live.mutex);
+        for (int i = 0; i < g_live.count; i++)
+            if (g_live.entries[i].room_id == room_id)
+                send(g_live.entries[i].socket_fd, gspkt, sizeof(gspkt), MSG_NOSIGNAL);
+        g_active_match[room_id] = match_id;
+        pthread_mutex_unlock(&g_live.mutex);
+    }
+
+    chair_state_init(room_id, match_id);
+
+    char log[80];
+    snprintf(log, sizeof(log),
+        "[match] room %d: match %d PLAYING (%d players)\n", room_id, match_id, p_count);
+    tlog(log);
 
     return NULL;
 }
@@ -662,6 +681,64 @@ static void *handle_live_connection(void *arg) {
             }
 
             pthread_mutex_unlock(&g_live.mutex);
+
+        } else if (msg_type == REQ_GAME_ACTION) {
+            /* Packet after type byte: [match_id 4B BE][user_id 4B BE][json_len 2B BE][json] */
+            uint8_t hdr[10];
+            size_t  got = 0;
+            int     ok  = 1;
+            while (got < sizeof(hdr)) {
+                ssize_t r = recv(fd, hdr + got, sizeof(hdr) - got, 0);
+                if (r <= 0) { ok = 0; break; }
+                got += (size_t)r;
+            }
+            if (!ok) break;
+
+            uint32_t be_mid, be_uid;
+            uint16_t be_jlen;
+            memcpy(&be_mid,  hdr,     4);
+            memcpy(&be_uid,  hdr + 4, 4);
+            memcpy(&be_jlen, hdr + 8, 2);
+
+            int pkt_match_id = (int)ntohl(be_mid);
+            int pkt_user_id  = (int)ntohl(be_uid);
+            int json_len     = (int)ntohs(be_jlen);
+
+            /* Reject spoofed user_id or oversized payloads. */
+            if (pkt_user_id != user_id || json_len <= 0 || json_len > MAX_JSON_PAYLOAD)
+                continue;
+
+            char *jbuf = malloc((size_t)json_len + 1);
+            if (!jbuf) continue;
+
+            got = 0; ok = 1;
+            while ((int)got < json_len) {
+                ssize_t r = recv(fd, jbuf + got, (size_t)(json_len - (int)got), 0);
+                if (r <= 0) { ok = 0; break; }
+                got += (size_t)r;
+            }
+            jbuf[json_len] = '\0';
+
+            if (!ok) { free(jbuf); break; }
+
+            int client_room = 0;
+            pthread_mutex_lock(&g_live.mutex);
+            for (int i = 0; i < g_live.count; i++) {
+                if (g_live.entries[i].socket_fd == fd) {
+                    client_room = g_live.entries[i].room_id;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&g_live.mutex);
+
+            if (client_room != 0) {
+                handle_game_action(fd, pkt_user_id, req.username,
+                                   pkt_match_id, client_room,
+                                   jbuf, json_len,
+                                   &g_live, db_ptr, &g_db_mutex);
+            }
+
+            free(jbuf);
 
         } else if (msg_type == REQ_LOGOUT) {
             char log_msg[128];

@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -Wall -I. $(shell mysql_config --cflags)
 LDFLAGS = $(shell mysql_config --libs) -lcrypt -lpthread
 
-SRCS = server.c db.c
+SRCS = server.c db.c game_actions.c
 OBJS = $(SRCS:.c=.o)
 TARGET = server
 
