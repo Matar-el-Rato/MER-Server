@@ -38,8 +38,10 @@ static const char *json_str_val(const char *json, const char *key)
 static void json_str_copy(const char *start, char *dst, int maxlen)
 {
     int i = 0;
-    while (i < maxlen - 1 && start[i] != '"' && start[i] != '\0')
-        dst[i] = start[i++];
+    while (i < maxlen - 1 && start[i] != '"' && start[i] != '\0') {
+        dst[i] = start[i];
+        i++;
+    }
     dst[i] = '\0';
 }
 
