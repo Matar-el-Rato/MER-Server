@@ -65,6 +65,17 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
     }
     if (slot == -1) return; /* unknown color */
 
+    /* Look up this user's skin_id from the live list. */
+    int skin_id = 101;
+    pthread_mutex_lock(&live->mutex);
+    for (int i = 0; i < live->count; i++) {
+        if (live->entries[i].user_id == user_id) {
+            skin_id = live->entries[i].skin_id;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&live->mutex);
+
     char broadcast_json[256];
     int  claimed = 0;
 
@@ -91,8 +102,8 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
         g_chair_state[room_id].slots[slot].username[MAX_USERNAME - 1] = '\0';
 
         snprintf(broadcast_json, sizeof(broadcast_json),
-            "{\"action\":\"chair_taken\",\"color\":\"%s\",\"user_id\":%d,\"username\":\"%s\"}",
-            color, user_id, username);
+            "{\"action\":\"chair_taken\",\"color\":\"%s\",\"user_id\":%d,\"username\":\"%s\",\"skin_id\":%d}",
+            color, user_id, username, skin_id);
         claimed = 1;
     }
 

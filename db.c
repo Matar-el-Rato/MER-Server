@@ -70,6 +70,23 @@ int db_authenticate_user(db_t *db, const char *username, const char *password_ha
     return status;
 }
 
+int db_get_skin_id(db_t *db, int user_id) {
+    mysql_ping(db->conn);
+    char query[128];
+    snprintf(query, sizeof(query),
+             "SELECT COALESCE(skin_id, 101) FROM users WHERE id=%d", user_id);
+
+    if (mysql_query(db->conn, query)) return 101;
+
+    MYSQL_RES *res = mysql_store_result(db->conn);
+    if (!res) return 101;
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    int skin = row ? atoi(row[0]) : 101;
+    mysql_free_result(res);
+    return skin;
+}
+
 int db_update_skin(db_t *db, int user_id, int skin_id) {
     mysql_ping(db->conn);
     char query[512];

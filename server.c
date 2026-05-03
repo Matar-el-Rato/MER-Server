@@ -250,7 +250,7 @@ static void broadcast_chat_from_fd(int sender_fd, const char *username, const ch
  * If MAX_CLIENTS is reached, the new client is rejected cleanly.
  * Its socket is closed by the caller (handle_live_connection).
  * ============================================================= */
-static int add_client(int fd, const char *username, int user_id) {
+static int add_client(int fd, const char *username, int user_id, int skin_id) {
     pthread_mutex_lock(&g_live.mutex);
 
     if (g_live.count >= MAX_CLIENTS) {
@@ -267,6 +267,7 @@ static int add_client(int fd, const char *username, int user_id) {
     strncpy(g_live.entries[g_live.count].username, username, MAX_USERNAME - 1);
     g_live.entries[g_live.count].username[MAX_USERNAME - 1] = '\0';
     g_live.entries[g_live.count].user_id  = user_id;
+    g_live.entries[g_live.count].skin_id  = skin_id;
     g_live.entries[g_live.count].room_id  = 0;
     g_live.entries[g_live.count].ready    = 0;
     g_live.count++;
@@ -504,7 +505,12 @@ static void *handle_live_connection(void *arg) {
     /* Convert user_id from network byte order to host byte order */
     int user_id = (int)ntohl(req.user_id);
 
-    if (add_client(fd, req.username, user_id) != 0) {
+    /* Fetch skin from DB so we can include it in chair_taken broadcasts. */
+    pthread_mutex_lock(&g_db_mutex);
+    int skin_id = db_get_skin_id(db_ptr, user_id);
+    pthread_mutex_unlock(&g_db_mutex);
+
+    if (add_client(fd, req.username, user_id, skin_id) != 0) {
         /* Server was at capacity — reject and close */
         close(fd);
         return NULL;

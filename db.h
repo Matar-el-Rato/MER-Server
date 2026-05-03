@@ -13,6 +13,7 @@ void db_close(db_t *db);
 
 int db_register_user(db_t *db, const char *username, const char *password_hash);
 int db_authenticate_user(db_t *db, const char *username, const char *password_hash, int *user_id, int *skin_id);
+int db_get_skin_id(db_t *db, int user_id); /* returns 101 on any error */
 int db_update_skin(db_t *db, int user_id, int skin_id);
 
 /* Match lifecycle */

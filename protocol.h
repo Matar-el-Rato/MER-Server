@@ -128,6 +128,7 @@ typedef struct {
     int  socket_fd;
     char username[MAX_USERNAME];
     int  user_id;
+    int  skin_id; // character skin, populated on REQ_CONNECT_LIVE from DB
     int  room_id; // 0 = lobby, 1-3 = room
     int  ready;   // 1 if this client has sent REQ_READY, 0 otherwise
 } connected_client_t;
