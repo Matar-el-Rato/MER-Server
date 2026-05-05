@@ -1,3 +1,7 @@
+/* =============================================================
+ * game_actions.c — all in-game action handlers
+ * ============================================================= */
+
 #include "game_actions.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,12 +14,13 @@ const char *SLOT_COLORS[MAX_ROOM_PLAYERS] = {"blue", "green", "yellow", "red"};
 chair_state_t  g_chair_state[NUM_ROOMS + 1];
 pthread_mutex_t g_chair_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-void chair_state_init(int room_id, int match_id)
+void chair_state_init(int room_id, int match_id, int player_count)
 {
     pthread_mutex_lock(&g_chair_mutex);
     memset(&g_chair_state[room_id], 0, sizeof(chair_state_t));
-    g_chair_state[room_id].match_id = match_id;
-    g_chair_state[room_id].room_id  = room_id;
+    g_chair_state[room_id].match_id     = match_id;
+    g_chair_state[room_id].room_id      = room_id;
+    g_chair_state[room_id].player_count = player_count;
     pthread_mutex_unlock(&g_chair_mutex);
 }
 
@@ -43,6 +48,23 @@ static void json_str_copy(const char *start, char *dst, int maxlen)
         i++;
     }
     dst[i] = '\0';
+}
+
+int chair_state_remove_user(int room_id, int user_id, char *color_out)
+{
+    int found = 0;
+    pthread_mutex_lock(&g_chair_mutex);
+    for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
+        if (g_chair_state[room_id].slots[i].user_id == user_id) {
+            strncpy(color_out, SLOT_COLORS[i], MAX_COLOR_LEN - 1);
+            color_out[MAX_COLOR_LEN - 1] = '\0';
+            memset(&g_chair_state[room_id].slots[i], 0, sizeof(chair_slot_t));
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_chair_mutex);
+    return found;
 }
 
 static void handle_choose_chair(int fd, int user_id, const char *username,
@@ -77,7 +99,9 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
     pthread_mutex_unlock(&live->mutex);
 
     char broadcast_json[256];
-    int  claimed = 0;
+    int  claimed      = 0;
+    int  all_seated   = 0;
+    char locked_json[512];
 
     pthread_mutex_lock(&g_chair_mutex);
 
@@ -97,7 +121,8 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
 
     /* Claim the slot if it's still free. */
     if (g_chair_state[room_id].slots[slot].user_id == 0) {
-        g_chair_state[room_id].slots[slot].user_id = user_id;
+        g_chair_state[room_id].slots[slot].user_id  = user_id;
+        g_chair_state[room_id].slots[slot].skin_id  = skin_id;
         strncpy(g_chair_state[room_id].slots[slot].username, username, MAX_USERNAME - 1);
         g_chair_state[room_id].slots[slot].username[MAX_USERNAME - 1] = '\0';
 
@@ -105,6 +130,34 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
             "{\"action\":\"chair_taken\",\"color\":\"%s\",\"user_id\":%d,\"username\":\"%s\",\"skin_id\":%d}",
             color, user_id, username, skin_id);
         claimed = 1;
+
+        /* Check if every expected chair is now filled. */
+        int filled = 0;
+        int player_count = g_chair_state[room_id].player_count;
+        for (int i = 0; i < MAX_ROOM_PLAYERS; i++)
+            if (g_chair_state[room_id].slots[i].user_id != 0) filled++;
+
+        if (filled >= player_count) {
+            /* Build chairs_locked JSON while still holding the mutex so the
+             * slot data can't be mutated underneath us. */
+            int pos = 0;
+            pos += snprintf(locked_json + pos, sizeof(locked_json) - (size_t)pos,
+                            "{\"action\":\"chairs_locked\",\"assignments\":[");
+            int first = 1;
+            for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
+                if (g_chair_state[room_id].slots[i].user_id == 0) continue;
+                pos += snprintf(locked_json + pos, sizeof(locked_json) - (size_t)pos,
+                    "%s{\"user_id\":%d,\"username\":\"%s\",\"skin_id\":%d,\"chair\":\"%s\"}",
+                    first ? "" : ",",
+                    g_chair_state[room_id].slots[i].user_id,
+                    g_chair_state[room_id].slots[i].username,
+                    g_chair_state[room_id].slots[i].skin_id,
+                    SLOT_COLORS[i]);
+                first = 0;
+            }
+            snprintf(locked_json + pos, sizeof(locked_json) - (size_t)pos, "]}");
+            all_seated = 1;
+        }
     }
 
     pthread_mutex_unlock(&g_chair_mutex);
@@ -117,6 +170,14 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
         db_set_chair(db, match_id, user_id, color);
         db_log_event(db, match_id, user_id, "choose_chair", broadcast_json);
         pthread_mutex_unlock(db_mutex);
+
+        if (all_seated) {
+            broadcast_game_action_to_room(live, room_id, locked_json,
+                                          (int)strlen(locked_json));
+            pthread_mutex_lock(db_mutex);
+            db_log_event(db, match_id, 0, "chairs_locked", locked_json);
+            pthread_mutex_unlock(db_mutex);
+        }
     }
 }
 

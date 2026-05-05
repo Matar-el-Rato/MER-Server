@@ -301,14 +301,19 @@ static int add_client(int fd, const char *username, int user_id, int skin_id) {
  * can receive a list that still contains a client we just removed.
  * ============================================================= */
 static void remove_client(int fd) {
-    int was_in_room  = 0;
-    int cancel_match = 0;
+    int  was_in_room     = 0;
+    int  cancel_match    = 0;
+    int  leave_user_id   = 0;
+    int  leave_match_id  = 0;
+    int  had_chair       = 0;
+    char vacated_color[MAX_COLOR_LEN] = {0};
 
     pthread_mutex_lock(&g_live.mutex);
 
     for (int i = 0; i < g_live.count; i++) {
         if (g_live.entries[i].socket_fd == fd) {
-            was_in_room = g_live.entries[i].room_id;
+            was_in_room   = g_live.entries[i].room_id;
+            leave_user_id = g_live.entries[i].user_id;
 
             char log[128];
             snprintf(log, sizeof(log),
@@ -323,6 +328,16 @@ static void remove_client(int fd) {
             broadcast_user_list();
             if (was_in_room != 0) {
                 broadcast_room_state(was_in_room);
+
+                leave_match_id = g_active_match[was_in_room];
+
+                /* Release chair if the player had claimed one.
+                 * chair_state_remove_user uses g_chair_mutex (not g_live.mutex),
+                 * so this is safe to call while holding g_live.mutex. */
+                if (leave_match_id != 0 && leave_user_id != 0)
+                    had_chair = chair_state_remove_user(was_in_room, leave_user_id,
+                                                        vacated_color);
+
                 /* Check if the room is now empty with an active match. */
                 int room_empty = 1;
                 for (int j = 0; j < g_live.count; j++)
@@ -337,6 +352,20 @@ static void remove_client(int fd) {
     }
 
     pthread_mutex_unlock(&g_live.mutex);
+
+    /* Broadcast chair_vacated AFTER releasing g_live.mutex to avoid
+     * deadlock (broadcast_game_action_to_room acquires it internally). */
+    if (had_chair && leave_match_id != 0) {
+        char vacated_json[128];
+        snprintf(vacated_json, sizeof(vacated_json),
+            "{\"action\":\"chair_vacated\",\"color\":\"%s\",\"user_id\":%d}",
+            vacated_color, leave_user_id);
+        broadcast_game_action_to_room(&g_live, was_in_room,
+                                      vacated_json, (int)strlen(vacated_json));
+        pthread_mutex_lock(&g_db_mutex);
+        db_log_event(db_ptr, leave_match_id, leave_user_id, "chair_vacated", vacated_json);
+        pthread_mutex_unlock(&g_db_mutex);
+    }
 
     if (cancel_match) {
         pthread_mutex_lock(&g_db_mutex);
@@ -465,7 +494,7 @@ static void *countdown_thread(void *arg) {
         pthread_mutex_unlock(&g_live.mutex);
     }
 
-    chair_state_init(room_id, match_id);
+    chair_state_init(room_id, match_id, p_count);
 
     char log[80];
     snprintf(log, sizeof(log),
