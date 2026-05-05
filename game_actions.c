@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
@@ -65,6 +66,80 @@ int chair_state_remove_user(int room_id, int user_id, char *color_out)
     }
     pthread_mutex_unlock(&g_chair_mutex);
     return found;
+}
+
+/* Shot order: yellow(slot 2) → blue(slot 0) → red(slot 3) → green(slot 1).
+ * Picks a random winner, builds the full initiative_sequence packet, and
+ * broadcasts it immediately after chairs_locked. */
+static void handle_initiative_sequence(client_list_t *live, int room_id, int match_id,
+                                        db_t *db, pthread_mutex_t *db_mutex)
+{
+    static const int SHOT_ORDER[] = {2, 0, 3, 1}; /* yellow, blue, red, green */
+    static const char *ITEM_NAMES[] = {
+        "gun", "cigarette", "magnifying_glass", "handcuffs", "fire_axe"
+    };
+    enum { NUM_ITEMS = 5 };
+
+    static int seeded = 0;
+    if (!seeded) { srand((unsigned int)time(NULL)); seeded = 1; }
+
+    int player_ids[MAX_ROOM_PLAYERS];
+    int player_count = 0;
+
+    pthread_mutex_lock(&g_chair_mutex);
+    for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
+        int slot = SHOT_ORDER[i];
+        if (g_chair_state[room_id].slots[slot].user_id != 0)
+            player_ids[player_count++] = g_chair_state[room_id].slots[slot].user_id;
+    }
+    pthread_mutex_unlock(&g_chair_mutex);
+
+    if (player_count == 0) return;
+
+    /* The player at winner_idx gets "bang"; all before them get "click". */
+    int winner_idx = rand() % player_count;
+
+    char json[1024];
+    int  pos = 0;
+
+    /* shots */
+    pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
+                    "{\"action\":\"" ACTION_INITIATIVE_SEQUENCE "\",\"shots\":[");
+    for (int i = 0; i <= winner_idx; i++)
+        pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
+                        "%s{\"user_id\":%d,\"result\":\"%s\"}",
+                        i ? "," : "", player_ids[i],
+                        i == winner_idx ? "bang" : "click");
+
+    /* winner_user_id + turn_order (winner first, then rest in shot order) */
+    pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
+                    "],\"winner_user_id\":%d,\"turn_order\":[%d",
+                    player_ids[winner_idx], player_ids[winner_idx]);
+    for (int i = 0; i < player_count; i++) {
+        if (i != winner_idx)
+            pos += snprintf(json + pos, sizeof(json) - (size_t)pos, ",%d", player_ids[i]);
+    }
+
+    /* item_grants: winner gets 2 distinct random items, others get 1 */
+    pos += snprintf(json + pos, sizeof(json) - (size_t)pos, "],\"item_grants\":[");
+    for (int i = 0; i < player_count; i++) {
+        int item1 = rand() % NUM_ITEMS;
+        int item2 = (item1 + 1 + rand() % (NUM_ITEMS - 1)) % NUM_ITEMS; /* != item1 */
+
+        pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
+                        "%s{\"user_id\":%d,\"items\":[\"%s\"",
+                        i ? "," : "", player_ids[i], ITEM_NAMES[item1]);
+        if (i == winner_idx)
+            pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
+                            ",\"%s\"", ITEM_NAMES[item2]);
+        pos += snprintf(json + pos, sizeof(json) - (size_t)pos, "]}");
+    }
+    pos += snprintf(json + pos, sizeof(json) - (size_t)pos, "]}");
+
+    broadcast_game_action_to_room(live, room_id, json, pos);
+    pthread_mutex_lock(db_mutex);
+    db_log_event(db, match_id, 0, ACTION_INITIATIVE_SEQUENCE, json);
+    pthread_mutex_unlock(db_mutex);
 }
 
 static void handle_choose_chair(int fd, int user_id, const char *username,
@@ -177,6 +252,8 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
             pthread_mutex_lock(db_mutex);
             db_log_event(db, match_id, 0, "chairs_locked", locked_json);
             pthread_mutex_unlock(db_mutex);
+
+            handle_initiative_sequence(live, room_id, match_id, db, db_mutex);
         }
     }
 }
