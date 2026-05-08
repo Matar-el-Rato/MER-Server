@@ -12,8 +12,11 @@
 
 const char *SLOT_COLORS[MAX_ROOM_PLAYERS] = {"blue", "green", "yellow", "red"};
 
-chair_state_t  g_chair_state[NUM_ROOMS + 1];
+chair_state_t   g_chair_state[NUM_ROOMS + 1];
 pthread_mutex_t g_chair_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+turn_state_t    g_turn_state[NUM_ROOMS + 1];
+pthread_mutex_t g_turn_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void chair_state_init(int room_id, int match_id, int player_count)
 {
@@ -37,6 +40,19 @@ static const char *json_str_val(const char *json, const char *key)
     while (*p == ' ' || *p == ':' || *p == '\t' || *p == '\n') p++;
     if (*p != '"') return NULL;
     return p + 1;
+}
+
+/* Returns the integer value for a JSON key, or default_val if not found. */
+static int json_int_val(const char *json, const char *key, int default_val)
+{
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\":", key);
+    const char *p = strstr(json, needle);
+    if (!p) return default_val;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '-' || (*p >= '0' && *p <= '9')) return atoi(p);
+    return default_val;
 }
 
 /* Copies a JSON string value into dst (up to maxlen-1 chars), stopping at
@@ -99,6 +115,22 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
     /* The player at winner_idx gets "bang"; all before them get "click". */
     int winner_idx = rand() % player_count;
 
+    /* Build turn_order array: winner first, then rest in shot order. */
+    int turn_order[MAX_ROOM_PLAYERS];
+    int turn_count = 0;
+    turn_order[turn_count++] = player_ids[winner_idx];
+    for (int i = 0; i < player_count; i++)
+        if (i != winner_idx) turn_order[turn_count++] = player_ids[i];
+
+    /* Store turn state so handle_roll_dice can validate and advance turns. */
+    pthread_mutex_lock(&g_turn_mutex);
+    memset(&g_turn_state[room_id], 0, sizeof(turn_state_t));
+    g_turn_state[room_id].player_count = turn_count;
+    g_turn_state[room_id].current_idx  = 0;
+    for (int i = 0; i < turn_count; i++)
+        g_turn_state[room_id].turn_order[i] = turn_order[i];
+    pthread_mutex_unlock(&g_turn_mutex);
+
     char json[1024];
     int  pos = 0;
 
@@ -114,11 +146,9 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
     /* winner_user_id + turn_order (winner first, then rest in shot order) */
     pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
                     "],\"winner_user_id\":%d,\"turn_order\":[%d",
-                    player_ids[winner_idx], player_ids[winner_idx]);
-    for (int i = 0; i < player_count; i++) {
-        if (i != winner_idx)
-            pos += snprintf(json + pos, sizeof(json) - (size_t)pos, ",%d", player_ids[i]);
-    }
+                    turn_order[0], turn_order[0]);
+    for (int i = 1; i < turn_count; i++)
+        pos += snprintf(json + pos, sizeof(json) - (size_t)pos, ",%d", turn_order[i]);
 
     /* item_grants: winner gets 2 distinct random items, others get 1 */
     pos += snprintf(json + pos, sizeof(json) - (size_t)pos, "],\"item_grants\":[");
@@ -140,6 +170,13 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
     pthread_mutex_lock(db_mutex);
     db_log_event(db, match_id, 0, ACTION_INITIATIVE_SEQUENCE, json);
     pthread_mutex_unlock(db_mutex);
+
+    /* Immediately announce whose turn it is (the initiative winner). */
+    char turn_json[64];
+    int  tlen = snprintf(turn_json, sizeof(turn_json),
+                         "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d}",
+                         turn_order[0]);
+    broadcast_game_action_to_room(live, room_id, turn_json, tlen);
 }
 
 static void handle_choose_chair(int fd, int user_id, const char *username,
@@ -258,6 +295,51 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
     }
 }
 
+static void handle_roll_dice(int fd, int user_id,
+                              int match_id, int room_id,
+                              const char *json,
+                              client_list_t *live,
+                              db_t *db, pthread_mutex_t *db_mutex)
+{
+    (void)fd;
+
+    int die1 = json_int_val(json, "die1", 0);
+    int die2 = json_int_val(json, "die2", 0);
+    if (die1 < 1 || die1 > 6 || die2 < 1 || die2 > 6) return;
+
+    int next_user_id = 0;
+
+    pthread_mutex_lock(&g_turn_mutex);
+    turn_state_t *ts = &g_turn_state[room_id];
+    if (ts->player_count == 0 ||
+        ts->turn_order[ts->current_idx] != user_id) {
+        pthread_mutex_unlock(&g_turn_mutex);
+        return; /* not this player's turn */
+    }
+    ts->current_idx = (ts->current_idx + 1) % ts->player_count;
+    next_user_id    = ts->turn_order[ts->current_idx];
+    pthread_mutex_unlock(&g_turn_mutex);
+
+    /* Broadcast dice_result to everyone in the room. */
+    char result_json[128];
+    int  rlen = snprintf(result_json, sizeof(result_json),
+                         "{\"action\":\"" ACTION_DICE_RESULT "\",\"user_id\":%d,"
+                         "\"die1\":%d,\"die2\":%d,\"total\":%d}",
+                         user_id, die1, die2, die1 + die2);
+    broadcast_game_action_to_room(live, room_id, result_json, rlen);
+
+    /* Broadcast whose turn is next. */
+    char turn_json[64];
+    int  tlen = snprintf(turn_json, sizeof(turn_json),
+                         "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d}",
+                         next_user_id);
+    broadcast_game_action_to_room(live, room_id, turn_json, tlen);
+
+    pthread_mutex_lock(db_mutex);
+    db_log_event(db, match_id, user_id, ACTION_ROLL_DICE, result_json);
+    pthread_mutex_unlock(db_mutex);
+}
+
 void handle_game_action(int fd, int user_id, const char *username,
                         int match_id, int room_id,
                         const char *json, int json_len,
@@ -272,11 +354,13 @@ void handle_game_action(int fd, int user_id, const char *username,
     char action[32];
     json_str_copy(av, action, sizeof(action));
 
-    if (strcmp(action, "choose_chair") == 0) {
+    if (strcmp(action, ACTION_CHOOSE_CHAIR) == 0) {
         handle_choose_chair(fd, user_id, username, match_id, room_id,
                             json, live, db, db_mutex);
+    } else if (strcmp(action, ACTION_ROLL_DICE) == 0) {
+        handle_roll_dice(fd, user_id, match_id, room_id,
+                         json, live, db, db_mutex);
     }
-    /* future: initiative_roll, use_gun, use_cigarette, ... */
 }
 
 void broadcast_game_action_to_room(client_list_t *live, int room_id,

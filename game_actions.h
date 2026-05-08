@@ -72,6 +72,18 @@ typedef struct {
 extern chair_state_t   g_chair_state[NUM_ROOMS + 1];
 extern pthread_mutex_t g_chair_mutex;
 
+/* Turn-order state for one room's active match. */
+typedef struct {
+    int turn_order[MAX_ROOM_PLAYERS]; /* user_ids, winner first */
+    int player_count;
+    int current_idx;                  /* whose turn it currently is */
+} turn_state_t;
+
+/* Per-room turn state; index 0 unused, 1-NUM_ROOMS active.
+ * Protected by g_turn_mutex. */
+extern turn_state_t    g_turn_state[NUM_ROOMS + 1];
+extern pthread_mutex_t g_turn_mutex;
+
 /* Zero-initialises the chair state for a room at match start. */
 void chair_state_init(int room_id, int match_id, int player_count);
 
