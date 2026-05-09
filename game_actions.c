@@ -3,6 +3,7 @@
  * ============================================================= */
 
 #include "game_actions.h"
+#include "parchis_logic.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,18 +19,11 @@ pthread_mutex_t g_chair_mutex = PTHREAD_MUTEX_INITIALIZER;
 turn_state_t    g_turn_state[NUM_ROOMS + 1];
 pthread_mutex_t g_turn_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-void chair_state_init(int room_id, int match_id, int player_count)
-{
-    pthread_mutex_lock(&g_chair_mutex);
-    memset(&g_chair_state[room_id], 0, sizeof(chair_state_t));
-    g_chair_state[room_id].match_id     = match_id;
-    g_chair_state[room_id].room_id      = room_id;
-    g_chair_state[room_id].player_count = player_count;
-    pthread_mutex_unlock(&g_chair_mutex);
-}
+game_state_t    g_game_state[NUM_ROOMS + 1];
+pthread_mutex_t g_game_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* Returns a pointer to the first character of a JSON string value (after the
- * opening '"'), or NULL if the key is missing or the value is not a string. */
+/* ── JSON helpers ──────────────────────────────────────────────────────────── */
+
 static const char *json_str_val(const char *json, const char *key)
 {
     char needle[64];
@@ -42,7 +36,6 @@ static const char *json_str_val(const char *json, const char *key)
     return p + 1;
 }
 
-/* Returns the integer value for a JSON key, or default_val if not found. */
 static int json_int_val(const char *json, const char *key, int default_val)
 {
     char needle[64];
@@ -55,8 +48,6 @@ static int json_int_val(const char *json, const char *key, int default_val)
     return default_val;
 }
 
-/* Copies a JSON string value into dst (up to maxlen-1 chars), stopping at
- * the closing '"' or end of string. */
 static void json_str_copy(const char *start, char *dst, int maxlen)
 {
     int i = 0;
@@ -67,26 +58,95 @@ static void json_str_copy(const char *start, char *dst, int maxlen)
     dst[i] = '\0';
 }
 
-int chair_state_remove_user(int room_id, int user_id, char *color_out)
+/* ── Public helpers ────────────────────────────────────────────────────────── */
+
+int user_id_to_slot(int room_id, int user_id)
 {
-    int found = 0;
-    pthread_mutex_lock(&g_chair_mutex);
-    for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
-        if (g_chair_state[room_id].slots[i].user_id == user_id) {
-            strncpy(color_out, SLOT_COLORS[i], MAX_COLOR_LEN - 1);
-            color_out[MAX_COLOR_LEN - 1] = '\0';
-            memset(&g_chair_state[room_id].slots[i], 0, sizeof(chair_slot_t));
-            found = 1;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_chair_mutex);
-    return found;
+    for (int i = 0; i < MAX_ROOM_PLAYERS; i++)
+        if (g_chair_state[room_id].slots[i].user_id == user_id) return i;
+    return -1;
 }
 
-/* Shot order: yellow(slot 2) → blue(slot 0) → red(slot 3) → green(slot 1).
- * Picks a random winner, builds the full initiative_sequence packet, and
- * broadcasts it immediately after chairs_locked. */
+/* How many finished pieces (at goal) does slot have? */
+static int count_finished(int room_id, int slot)
+{
+    int n = 0;
+    for (int p = 0; p < 4; p++)
+        if (parchis_is_goal(g_game_state[room_id].piece_positions[slot][p])) n++;
+    return n;
+}
+
+/* Broadcast a piece-level capture: send victim piece home and report it. */
+static void do_capture(int room_id, int attacker_user_id, int victim_slot, int victim_piece,
+                        int square, client_list_t *live, db_t *db, pthread_mutex_t *db_mutex,
+                        int match_id)
+{
+    game_state_t *gs = &g_game_state[room_id];
+    gs->piece_positions[victim_slot][victim_piece] = 0;
+
+    int victim_user_id = g_chair_state[room_id].slots[victim_slot].user_id;
+
+    char json[256];
+    int  len = snprintf(json, sizeof(json),
+        "{\"action\":\"" ACTION_CAPTURE "\","
+        "\"attacker_user_id\":%d,\"victim_user_id\":%d,"
+        "\"victim_piece_id\":%d,\"square\":%d,\"bonus_movements\":20}",
+        attacker_user_id, victim_user_id, victim_piece, square);
+    broadcast_game_action_to_room(live, room_id, json, len);
+    pthread_mutex_lock(db_mutex);
+    db_log_event(db, match_id, attacker_user_id, ACTION_CAPTURE, json);
+    pthread_mutex_unlock(db_mutex);
+}
+
+/* Advance turn to the next player, broadcasting turn_end + turn_start. */
+static void advance_turn(int room_id, int current_user_id, client_list_t *live,
+                          db_t *db, pthread_mutex_t *db_mutex, int match_id)
+{
+    pthread_mutex_lock(&g_turn_mutex);
+    turn_state_t *ts = &g_turn_state[room_id];
+    ts->current_idx  = (ts->current_idx + 1) % ts->player_count;
+    int next_uid     = ts->turn_order[ts->current_idx];
+    pthread_mutex_unlock(&g_turn_mutex);
+
+    char json[128];
+    int  len = snprintf(json, sizeof(json),
+        "{\"action\":\"" ACTION_TURN_END "\",\"user_id\":%d,\"next_user_id\":%d}",
+        current_user_id, next_uid);
+    broadcast_game_action_to_room(live, room_id, json, len);
+
+    /* Reset the next player's consecutive doubles if it's a clean turn. */
+    int next_slot = user_id_to_slot(room_id, next_uid);
+    if (next_slot >= 0) {
+        pthread_mutex_lock(&g_game_mutex);
+        /* Check handcuff */
+        bool handcuffed = g_game_state[room_id].is_handcuffed[next_slot];
+        if (handcuffed) g_game_state[room_id].is_handcuffed[next_slot] = false;
+        pthread_mutex_unlock(&g_game_mutex);
+
+        if (handcuffed) {
+            len = snprintf(json, sizeof(json),
+                "{\"action\":\"" ACTION_HANDCUFF_SKIP "\",\"user_id\":%d}", next_uid);
+            broadcast_game_action_to_room(live, room_id, json, len);
+            /* Skip to the player after next. */
+            advance_turn(room_id, next_uid, live, db, db_mutex, match_id);
+            return;
+        }
+    }
+
+    len = snprintf(json, sizeof(json),
+        "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d,"
+        "\"consecutive_doubles\":%d,\"pending_movements\":0}",
+        next_uid,
+        next_slot >= 0 ? g_game_state[room_id].consecutive_doubles[next_slot] : 0);
+    broadcast_game_action_to_room(live, room_id, json, len);
+
+    pthread_mutex_lock(db_mutex);
+    db_log_event(db, match_id, 0, ACTION_TURN_START, json);
+    pthread_mutex_unlock(db_mutex);
+}
+
+/* ── Initiative sequence ───────────────────────────────────────────────────── */
+
 static void handle_initiative_sequence(client_list_t *live, int room_id, int match_id,
                                         db_t *db, pthread_mutex_t *db_mutex)
 {
@@ -94,7 +154,6 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
     static const char *ITEM_NAMES[] = {
         "gun", "cigarette", "magnifying_glass", "handcuffs", "fire_axe"
     };
-    enum { NUM_ITEMS = 5 };
 
     static int seeded = 0;
     if (!seeded) { srand((unsigned int)time(NULL)); seeded = 1; }
@@ -112,17 +171,14 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
 
     if (player_count == 0) return;
 
-    /* The player at winner_idx gets "bang"; all before them get "click". */
     int winner_idx = rand() % player_count;
 
-    /* Build turn_order array: winner first, then rest in shot order. */
     int turn_order[MAX_ROOM_PLAYERS];
     int turn_count = 0;
     turn_order[turn_count++] = player_ids[winner_idx];
     for (int i = 0; i < player_count; i++)
         if (i != winner_idx) turn_order[turn_count++] = player_ids[i];
 
-    /* Store turn state so handle_roll_dice can validate and advance turns. */
     pthread_mutex_lock(&g_turn_mutex);
     memset(&g_turn_state[room_id], 0, sizeof(turn_state_t));
     g_turn_state[room_id].player_count = turn_count;
@@ -131,10 +187,21 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
         g_turn_state[room_id].turn_order[i] = turn_order[i];
     pthread_mutex_unlock(&g_turn_mutex);
 
+    /* Initialise game state for this room. */
+    pthread_mutex_lock(&g_game_mutex);
+    memset(&g_game_state[room_id], 0, sizeof(game_state_t));
+    g_game_state[room_id].active       = true;
+    g_game_state[room_id].match_id     = match_id;
+    g_game_state[room_id].room_id      = room_id;
+    g_game_state[room_id].player_count = turn_count;
+    for (int i = 0; i < MAX_ROOM_PLAYERS; i++)
+        g_game_state[room_id].life_charges[i] = 3;
+    parchis_random_golden_squares(g_game_state[room_id].golden_squares);
+    pthread_mutex_unlock(&g_game_mutex);
+
+    /* Build initiative_sequence JSON. */
     char json[1024];
     int  pos = 0;
-
-    /* shots */
     pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
                     "{\"action\":\"" ACTION_INITIATIVE_SEQUENCE "\",\"shots\":[");
     for (int i = 0; i <= winner_idx; i++)
@@ -143,19 +210,16 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
                         i ? "," : "", player_ids[i],
                         i == winner_idx ? "bang" : "click");
 
-    /* winner_user_id + turn_order (winner first, then rest in shot order) */
     pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
                     "],\"winner_user_id\":%d,\"turn_order\":[%d",
                     turn_order[0], turn_order[0]);
     for (int i = 1; i < turn_count; i++)
         pos += snprintf(json + pos, sizeof(json) - (size_t)pos, ",%d", turn_order[i]);
 
-    /* item_grants: winner gets 2 distinct random items, others get 1 */
     pos += snprintf(json + pos, sizeof(json) - (size_t)pos, "],\"item_grants\":[");
     for (int i = 0; i < player_count; i++) {
         int item1 = rand() % NUM_ITEMS;
-        int item2 = (item1 + 1 + rand() % (NUM_ITEMS - 1)) % NUM_ITEMS; /* != item1 */
-
+        int item2 = (item1 + 1 + rand() % (NUM_ITEMS - 1)) % NUM_ITEMS;
         pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
                         "%s{\"user_id\":%d,\"items\":[\"%s\"",
                         i ? "," : "", player_ids[i], ITEM_NAMES[item1]);
@@ -164,19 +228,56 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
                             ",\"%s\"", ITEM_NAMES[item2]);
         pos += snprintf(json + pos, sizeof(json) - (size_t)pos, "]}");
     }
-    pos += snprintf(json + pos, sizeof(json) - (size_t)pos, "]}");
+
+    /* Include golden squares so clients can mark them on the board. */
+    pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
+                    "],\"golden_squares\":[%d,%d,%d,%d]}",
+                    g_game_state[room_id].golden_squares[0],
+                    g_game_state[room_id].golden_squares[1],
+                    g_game_state[room_id].golden_squares[2],
+                    g_game_state[room_id].golden_squares[3]);
 
     broadcast_game_action_to_room(live, room_id, json, pos);
     pthread_mutex_lock(db_mutex);
     db_log_event(db, match_id, 0, ACTION_INITIATIVE_SEQUENCE, json);
     pthread_mutex_unlock(db_mutex);
 
-    /* Immediately announce whose turn it is (the initiative winner). */
-    char turn_json[64];
+    /* First turn_start for the initiative winner. */
+    char turn_json[128];
     int  tlen = snprintf(turn_json, sizeof(turn_json),
-                         "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d}",
+                         "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d,"
+                         "\"consecutive_doubles\":0,\"pending_movements\":0}",
                          turn_order[0]);
     broadcast_game_action_to_room(live, room_id, turn_json, tlen);
+}
+
+/* ── Chair selection ───────────────────────────────────────────────────────── */
+
+void chair_state_init(int room_id, int match_id, int player_count)
+{
+    pthread_mutex_lock(&g_chair_mutex);
+    memset(&g_chair_state[room_id], 0, sizeof(chair_state_t));
+    g_chair_state[room_id].match_id     = match_id;
+    g_chair_state[room_id].room_id      = room_id;
+    g_chair_state[room_id].player_count = player_count;
+    pthread_mutex_unlock(&g_chair_mutex);
+}
+
+int chair_state_remove_user(int room_id, int user_id, char *color_out)
+{
+    int found = 0;
+    pthread_mutex_lock(&g_chair_mutex);
+    for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
+        if (g_chair_state[room_id].slots[i].user_id == user_id) {
+            strncpy(color_out, SLOT_COLORS[i], MAX_COLOR_LEN - 1);
+            color_out[MAX_COLOR_LEN - 1] = '\0';
+            memset(&g_chair_state[room_id].slots[i], 0, sizeof(chair_slot_t));
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_chair_mutex);
+    return found;
 }
 
 static void handle_choose_chair(int fd, int user_id, const char *username,
@@ -197,9 +298,8 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
     for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
         if (strcmp(SLOT_COLORS[i], color) == 0) { slot = i; break; }
     }
-    if (slot == -1) return; /* unknown color */
+    if (slot == -1) return;
 
-    /* Look up this user's skin_id from the live list. */
     int skin_id = 101;
     pthread_mutex_lock(&live->mutex);
     for (int i = 0; i < live->count; i++) {
@@ -217,24 +317,19 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
 
     pthread_mutex_lock(&g_chair_mutex);
 
-    /* Validate this packet belongs to the current match. */
     if (g_chair_state[room_id].match_id != match_id) {
         pthread_mutex_unlock(&g_chair_mutex);
         return;
     }
-
-    /* Reject if this user already claimed any chair. */
     for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
         if (g_chair_state[room_id].slots[i].user_id == user_id) {
             pthread_mutex_unlock(&g_chair_mutex);
             return;
         }
     }
-
-    /* Claim the slot if it's still free. */
     if (g_chair_state[room_id].slots[slot].user_id == 0) {
-        g_chair_state[room_id].slots[slot].user_id  = user_id;
-        g_chair_state[room_id].slots[slot].skin_id  = skin_id;
+        g_chair_state[room_id].slots[slot].user_id = user_id;
+        g_chair_state[room_id].slots[slot].skin_id = skin_id;
         strncpy(g_chair_state[room_id].slots[slot].username, username, MAX_USERNAME - 1);
         g_chair_state[room_id].slots[slot].username[MAX_USERNAME - 1] = '\0';
 
@@ -243,15 +338,12 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
             color, user_id, username, skin_id);
         claimed = 1;
 
-        /* Check if every expected chair is now filled. */
         int filled = 0;
         int player_count = g_chair_state[room_id].player_count;
         for (int i = 0; i < MAX_ROOM_PLAYERS; i++)
             if (g_chair_state[room_id].slots[i].user_id != 0) filled++;
 
         if (filled >= player_count) {
-            /* Build chairs_locked JSON while still holding the mutex so the
-             * slot data can't be mutated underneath us. */
             int pos = 0;
             pos += snprintf(locked_json + pos, sizeof(locked_json) - (size_t)pos,
                             "{\"action\":\"chairs_locked\",\"assignments\":[");
@@ -271,13 +363,11 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
             all_seated = 1;
         }
     }
-
     pthread_mutex_unlock(&g_chair_mutex);
 
     if (claimed) {
         broadcast_game_action_to_room(live, room_id, broadcast_json,
                                       (int)strlen(broadcast_json));
-
         pthread_mutex_lock(db_mutex);
         db_set_chair(db, match_id, user_id, color);
         db_log_event(db, match_id, user_id, "choose_chair", broadcast_json);
@@ -289,11 +379,12 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
             pthread_mutex_lock(db_mutex);
             db_log_event(db, match_id, 0, "chairs_locked", locked_json);
             pthread_mutex_unlock(db_mutex);
-
             handle_initiative_sequence(live, room_id, match_id, db, db_mutex);
         }
     }
 }
+
+/* ── Roll dice ─────────────────────────────────────────────────────────────── */
 
 static void handle_roll_dice(int fd, int user_id,
                               int match_id, int room_id,
@@ -303,42 +394,421 @@ static void handle_roll_dice(int fd, int user_id,
 {
     (void)fd;
 
+    /* Client sends die values from physical dice roll. */
     int die1 = json_int_val(json, "die1", 0);
     int die2 = json_int_val(json, "die2", 0);
     if (die1 < 1 || die1 > 6 || die2 < 1 || die2 > 6) return;
 
-    int next_user_id = 0;
-
+    /* Validate it's this player's turn. */
     pthread_mutex_lock(&g_turn_mutex);
     turn_state_t *ts = &g_turn_state[room_id];
-    if (ts->player_count == 0 ||
-        ts->turn_order[ts->current_idx] != user_id) {
+    if (ts->player_count == 0 || ts->turn_order[ts->current_idx] != user_id) {
         pthread_mutex_unlock(&g_turn_mutex);
-        return; /* not this player's turn */
+        return;
     }
-    ts->current_idx = (ts->current_idx + 1) % ts->player_count;
-    next_user_id    = ts->turn_order[ts->current_idx];
     pthread_mutex_unlock(&g_turn_mutex);
 
-    /* Broadcast dice_result to everyone in the room. */
-    char result_json[128];
-    int  rlen = snprintf(result_json, sizeof(result_json),
-                         "{\"action\":\"" ACTION_DICE_RESULT "\",\"user_id\":%d,"
-                         "\"die1\":%d,\"die2\":%d,\"total\":%d}",
-                         user_id, die1, die2, die1 + die2);
-    broadcast_game_action_to_room(live, room_id, result_json, rlen);
+    int slot = user_id_to_slot(room_id, user_id);
+    if (slot < 0) return;
 
-    /* Broadcast whose turn is next. */
-    char turn_json[64];
-    int  tlen = snprintf(turn_json, sizeof(turn_json),
-                         "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d}",
-                         next_user_id);
-    broadcast_game_action_to_room(live, room_id, turn_json, tlen);
+    pthread_mutex_lock(&g_game_mutex);
+    game_state_t *gs = &g_game_state[room_id];
+
+    /* Track consecutive doubles. */
+    bool is_doubles = (die1 == die2);
+    if (is_doubles) gs->consecutive_doubles[slot]++;
+    else            gs->consecutive_doubles[slot] = 0;
+
+    int consec = gs->consecutive_doubles[slot];
+
+    /* Triple double: penalise without actually rolling. */
+    if (consec >= 3) {
+        gs->consecutive_doubles[slot] = 0;
+        gs->pending_die1 = 0;
+        gs->pending_die2 = 0;
+
+        /* Pick a random active (non-home, non-goal) piece. */
+        int victim_piece = -1;
+        for (int p = 0; p < 4; p++) {
+            int pos = gs->piece_positions[slot][p];
+            if (pos != 0 && !parchis_is_goal(pos)) { victim_piece = p; break; }
+        }
+        pthread_mutex_unlock(&g_game_mutex);
+
+        if (victim_piece >= 0) {
+            pthread_mutex_lock(&g_game_mutex);
+            g_game_state[room_id].piece_positions[slot][victim_piece] = 0;
+            pthread_mutex_unlock(&g_game_mutex);
+
+            char pen_json[128];
+            int  plen = snprintf(pen_json, sizeof(pen_json),
+                "{\"action\":\"" ACTION_TRIPLE_DOUBLE "\",\"user_id\":%d,\"piece_id\":%d}",
+                user_id, victim_piece);
+            broadcast_game_action_to_room(live, room_id, pen_json, plen);
+
+            /* Life lost */
+            pthread_mutex_lock(&g_game_mutex);
+            gs->life_charges[slot]--;
+            int lives = gs->life_charges[slot];
+            pthread_mutex_unlock(&g_game_mutex);
+
+            snprintf(pen_json, sizeof(pen_json),
+                "{\"action\":\"" ACTION_LIFE_LOST "\",\"user_id\":%d,\"lives_remaining\":%d,\"reason\":\"triple_double\"}",
+                user_id, lives);
+            broadcast_game_action_to_room(live, room_id, pen_json, (int)strlen(pen_json));
+        }
+
+        advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+        return;
+    }
+
+    /* Store dice for handle_move_piece to consume. */
+    gs->pending_die1 = die1;
+    gs->pending_die2 = die2;
+
+    /* Compute moveable pieces. */
+    int moveable[4];
+    bool can_exit = false;
+    int  n_moveable = parchis_moveable_pieces(slot, die1, die2,
+                                               gs->piece_positions,
+                                               moveable, &can_exit);
+
+    pthread_mutex_unlock(&g_game_mutex);
+
+    /* Build dice_result JSON with moveable_pieces array. */
+    char result_json[256];
+    int  rpos = 0;
+    rpos += snprintf(result_json + rpos, sizeof(result_json) - (size_t)rpos,
+                     "{\"action\":\"" ACTION_DICE_RESULT "\","
+                     "\"user_id\":%d,\"die1\":%d,\"die2\":%d,\"total\":%d,"
+                     "\"is_doubles\":%s,\"consecutive_doubles\":%d,"
+                     "\"can_exit_house\":%s,\"moveable_pieces\":[",
+                     user_id, die1, die2, die1 + die2,
+                     is_doubles ? "true" : "false", consec,
+                     can_exit   ? "true" : "false");
+    for (int i = 0; i < n_moveable; i++)
+        rpos += snprintf(result_json + rpos, sizeof(result_json) - (size_t)rpos,
+                         "%s%d", i ? "," : "", moveable[i]);
+    rpos += snprintf(result_json + rpos, sizeof(result_json) - (size_t)rpos, "]}");
+
+    broadcast_game_action_to_room(live, room_id, result_json, rpos);
 
     pthread_mutex_lock(db_mutex);
     db_log_event(db, match_id, user_id, ACTION_ROLL_DICE, result_json);
     pthread_mutex_unlock(db_mutex);
+
+    /* No moveable pieces → auto-pass. */
+    if (n_moveable == 0) {
+        advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+    }
 }
+
+/* ── Move piece ────────────────────────────────────────────────────────────── */
+
+static void handle_move_piece(int fd, int user_id,
+                               int match_id, int room_id,
+                               const char *json,
+                               client_list_t *live,
+                               db_t *db, pthread_mutex_t *db_mutex)
+{
+    (void)fd;
+
+    int piece_id = json_int_val(json, "piece_id", -1);
+    if (piece_id < 0 || piece_id > 3) return;
+
+    /* Validate it's this player's turn. */
+    pthread_mutex_lock(&g_turn_mutex);
+    turn_state_t *ts = &g_turn_state[room_id];
+    if (ts->player_count == 0 || ts->turn_order[ts->current_idx] != user_id) {
+        pthread_mutex_unlock(&g_turn_mutex);
+        return;
+    }
+    pthread_mutex_unlock(&g_turn_mutex);
+
+    int slot = user_id_to_slot(room_id, user_id);
+    if (slot < 0) return;
+
+    pthread_mutex_lock(&g_game_mutex);
+    game_state_t *gs = &g_game_state[room_id];
+
+    /* Validate dice or bonus pending. */
+    bool bonus_move = (gs->pending_die1 == 0 && gs->pending_die2 == 0
+                       && gs->pending_movements[slot] > 0);
+    bool normal_move = (gs->pending_die1 > 0);
+    if (!bonus_move && !normal_move) {
+        pthread_mutex_unlock(&g_game_mutex);
+        return;
+    }
+
+    int from_sq = gs->piece_positions[slot][piece_id];
+    int die1    = gs->pending_die1;
+    int die2    = gs->pending_die2;
+    bool is_doubles = (die1 == die2 && die1 > 0);
+    int to_sq;
+    bool is_exit = false;
+
+    if (bonus_move) {
+        /* Extra move using pending_movements only. */
+        int steps = gs->pending_movements[slot];
+        if (from_sq == 0) {
+            pthread_mutex_unlock(&g_game_mutex);
+            return; /* can't use bonus to exit home */
+        }
+        to_sq = parchis_advance(slot, from_sq, steps);
+        if (to_sq < 0) { pthread_mutex_unlock(&g_game_mutex); return; }
+    } else if (from_sq == 0) {
+        /* Exit from home — need a 5 die. */
+        if (die1 != 5 && die2 != 5 && (die1 + die2) != 5) {
+            pthread_mutex_unlock(&g_game_mutex);
+            return;
+        }
+        to_sq    = PARCHIS_EXIT[slot];
+        is_exit  = true;
+    } else {
+        int steps = die1 + die2;
+        to_sq = parchis_advance(slot, from_sq, steps);
+        if (to_sq < 0) { pthread_mutex_unlock(&g_game_mutex); return; }
+
+        if (!parchis_path_clear(slot, from_sq, steps, gs->piece_positions)) {
+            pthread_mutex_unlock(&g_game_mutex);
+            return;
+        }
+    }
+
+    /* Verify landing is allowed (no enemy barrier). */
+    bool enemy_barrier = false;
+    for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
+        if (s == slot) continue;
+        if (parchis_is_barrier(to_sq, s, gs->piece_positions)) { enemy_barrier = true; break; }
+    }
+    if (enemy_barrier) { pthread_mutex_unlock(&g_game_mutex); return; }
+
+    /* Apply the move. */
+    gs->piece_positions[slot][piece_id] = to_sq;
+
+    /* Consume dice / bonus. */
+    if (bonus_move) {
+        gs->pending_movements[slot] = 0;
+    } else {
+        gs->pending_die1 = 0;
+        gs->pending_die2 = 0;
+    }
+
+    bool on_safe = parchis_is_safe(to_sq, slot);
+
+    /* Check barrier formed/broken before capture check. */
+    int pieces_at_to = 0;
+    for (int p = 0; p < 4; p++)
+        if (gs->piece_positions[slot][p] == to_sq) pieces_at_to++;
+    int pieces_at_from = 0;
+    for (int p = 0; p < 4; p++)
+        if (gs->piece_positions[slot][p] == from_sq) pieces_at_from++;
+
+    bool barrier_formed = (pieces_at_to >= 2);
+    bool barrier_broken = (from_sq > 0 && pieces_at_from == 1);  /* was 2, now 1 */
+
+    pthread_mutex_unlock(&g_game_mutex);
+
+    /* Broadcast piece_moved. */
+    char moved_json[256];
+    int  mlen = snprintf(moved_json, sizeof(moved_json),
+        "{\"action\":\"" ACTION_PIECE_MOVED "\","
+        "\"user_id\":%d,\"piece_id\":%d,\"from\":%d,\"to\":%d,"
+        "\"is_exit\":%s,\"on_safe_square\":%s}",
+        user_id, piece_id, from_sq, to_sq,
+        is_exit   ? "true" : "false",
+        on_safe   ? "true" : "false");
+    broadcast_game_action_to_room(live, room_id, moved_json, mlen);
+    pthread_mutex_lock(db_mutex);
+    db_log_event(db, match_id, user_id, ACTION_MOVE_PIECE, moved_json);
+    pthread_mutex_unlock(db_mutex);
+
+    /* Barrier formed? */
+    if (barrier_formed && to_sq > 0 && !parchis_is_goal(to_sq)) {
+        int ids[2]; int n = 0;
+        for (int p = 0; p < 4 && n < 2; p++)
+            if (gs->piece_positions[slot][p] == to_sq) ids[n++] = p;
+        char bar_json[128];
+        int  blen = snprintf(bar_json, sizeof(bar_json),
+            "{\"action\":\"" ACTION_BARRIER_FORMED "\","
+            "\"user_id\":%d,\"square\":%d,\"piece_ids\":[%d,%d]}",
+            user_id, to_sq, ids[0], n > 1 ? ids[1] : ids[0]);
+        broadcast_game_action_to_room(live, room_id, bar_json, blen);
+    }
+
+    /* Barrier broken at from_sq? */
+    if (barrier_broken && from_sq > 0 && !parchis_is_goal(from_sq)) {
+        char bar_json[128];
+        int  blen = snprintf(bar_json, sizeof(bar_json),
+            "{\"action\":\"" ACTION_BARRIER_BROKEN "\","
+            "\"user_id\":%d,\"square\":%d,\"reason\":\"moved\"}",
+            user_id, from_sq);
+        broadcast_game_action_to_room(live, room_id, bar_json, blen);
+    }
+
+    /* Captures — land on non-safe square with enemy pieces (not a barrier). */
+    int  captured_count = 0;
+    if (!on_safe && !parchis_is_goal(to_sq)) {
+        for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
+            if (s == slot) continue;
+            for (int p = 0; p < 4; p++) {
+                pthread_mutex_lock(&g_game_mutex);
+                bool at_sq = (g_game_state[room_id].piece_positions[s][p] == to_sq);
+                pthread_mutex_unlock(&g_game_mutex);
+                if (!at_sq) continue;
+
+                do_capture(room_id, user_id, s, p, to_sq, live, db, db_mutex, match_id);
+                captured_count++;
+
+                pthread_mutex_lock(&g_game_mutex);
+                g_game_state[room_id].pending_movements[slot] += 20;
+                pthread_mutex_unlock(&g_game_mutex);
+            }
+        }
+    }
+
+    /* Goal scored? */
+    bool scored_goal = parchis_is_goal(to_sq);
+    if (scored_goal) {
+        pthread_mutex_lock(&g_game_mutex);
+        int finished = count_finished(room_id, slot);
+        g_game_state[room_id].pending_movements[slot] += 10;
+        pthread_mutex_unlock(&g_game_mutex);
+
+        char goal_json[128];
+        int  glen = snprintf(goal_json, sizeof(goal_json),
+            "{\"action\":\"" ACTION_GOAL_SCORED "\","
+            "\"user_id\":%d,\"piece_id\":%d,\"pieces_in_goal\":%d,\"bonus_movements\":10}",
+            user_id, piece_id, finished);
+        broadcast_game_action_to_room(live, room_id, goal_json, glen);
+        pthread_mutex_lock(db_mutex);
+        db_log_event(db, match_id, user_id, ACTION_GOAL_SCORED, goal_json);
+        pthread_mutex_unlock(db_mutex);
+
+        /* Win condition: all 4 pieces in goal. */
+        if (finished >= 4) {
+            char win_json[128];
+            int  wlen = snprintf(win_json, sizeof(win_json),
+                "{\"action\":\"" ACTION_GAME_OVER "\","
+                "\"winner_user_id\":%d,\"reason\":\"race\"}", user_id);
+            broadcast_game_action_to_room(live, room_id, win_json, wlen);
+            return;
+        }
+    }
+
+    /* Golden square? */
+    pthread_mutex_lock(&g_game_mutex);
+    bool is_golden = false;
+    for (int q = 0; q < 4; q++)
+        if (g_game_state[room_id].golden_squares[q] == to_sq) { is_golden = true; break; }
+    pthread_mutex_unlock(&g_game_mutex);
+
+    if (is_golden && !parchis_is_goal(to_sq)) {
+        static const char *ITEM_NAMES[] = {
+            "gun", "cigarette", "magnifying_glass", "handcuffs", "fire_axe"
+        };
+        /* 1-in-6 chance of empty; otherwise pick a random item player doesn't hold. */
+        int roll = rand() % 6;
+        char gold_json[192];
+        if (roll == 0) {
+            int glen = snprintf(gold_json, sizeof(gold_json),
+                "{\"action\":\"" ACTION_GOLDEN_SQUARE "\","
+                "\"user_id\":%d,\"square\":%d,\"roulette_result\":\"click\",\"item\":null}",
+                user_id, to_sq);
+            broadcast_game_action_to_room(live, room_id, gold_json, glen);
+        } else {
+            /* Try to give a random item the player doesn't have. */
+            pthread_mutex_lock(&g_game_mutex);
+            int item = -1;
+            for (int tries = 0; tries < NUM_ITEMS; tries++) {
+                int candidate = rand() % NUM_ITEMS;
+                if (!g_game_state[room_id].has_item[slot][candidate]) { item = candidate; break; }
+            }
+            if (item >= 0) g_game_state[room_id].has_item[slot][item] = true;
+            pthread_mutex_unlock(&g_game_mutex);
+
+            if (item < 0) {
+                /* All items held — click. */
+                int glen = snprintf(gold_json, sizeof(gold_json),
+                    "{\"action\":\"" ACTION_GOLDEN_SQUARE "\","
+                    "\"user_id\":%d,\"square\":%d,\"roulette_result\":\"click\",\"item\":null}",
+                    user_id, to_sq);
+                broadcast_game_action_to_room(live, room_id, gold_json, glen);
+            } else {
+                int glen = snprintf(gold_json, sizeof(gold_json),
+                    "{\"action\":\"" ACTION_GOLDEN_SQUARE "\","
+                    "\"user_id\":%d,\"square\":%d,\"roulette_result\":\"item\",\"item\":\"%s\"}",
+                    user_id, to_sq, ITEM_NAMES[item]);
+                broadcast_game_action_to_room(live, room_id, gold_json, glen);
+            }
+        }
+    }
+
+    /* Determine turn flow. */
+    pthread_mutex_lock(&g_game_mutex);
+    int pending_mvs = g_game_state[room_id].pending_movements[slot];
+    pthread_mutex_unlock(&g_game_mutex);
+
+    if (pending_mvs > 0) {
+        /* Extra move from capture/goal bonus. */
+        const char *reason = (captured_count > 0 && !scored_goal) ? "capture_bonus"
+                           : (scored_goal && captured_count == 0)  ? "goal_bonus"
+                           : "capture_bonus";
+        char extra_json[128];
+        int  elen = snprintf(extra_json, sizeof(extra_json),
+            "{\"action\":\"" ACTION_EXTRA_TURN "\","
+            "\"user_id\":%d,\"reason\":\"%s\",\"pending_movements\":%d}",
+            user_id, reason, pending_mvs);
+        broadcast_game_action_to_room(live, room_id, extra_json, elen);
+    } else if (is_doubles) {
+        /* Doubles: player rolls again. */
+        char extra_json[128];
+        int  elen = snprintf(extra_json, sizeof(extra_json),
+            "{\"action\":\"" ACTION_EXTRA_TURN "\","
+            "\"user_id\":%d,\"reason\":\"doubles\",\"pending_movements\":0}",
+            user_id);
+        broadcast_game_action_to_room(live, room_id, extra_json, elen);
+
+        /* Re-send turn_start so client re-enables roll. */
+        char ts_json[128];
+        int  tslen = snprintf(ts_json, sizeof(ts_json),
+            "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d,"
+            "\"consecutive_doubles\":%d,\"pending_movements\":0}",
+            user_id, g_game_state[room_id].consecutive_doubles[slot]);
+        broadcast_game_action_to_room(live, room_id, ts_json, tslen);
+    } else {
+        advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+    }
+}
+
+/* ── Item stubs ────────────────────────────────────────────────────────────── */
+
+static void handle_use_gun(int fd, int user_id, int match_id, int room_id,
+                            const char *json, client_list_t *live,
+                            db_t *db, pthread_mutex_t *db_mutex)
+{ (void)fd;(void)user_id;(void)match_id;(void)room_id;(void)json;(void)live;(void)db;(void)db_mutex; }
+
+static void handle_use_cigarette(int fd, int user_id, int match_id, int room_id,
+                                  const char *json, client_list_t *live,
+                                  db_t *db, pthread_mutex_t *db_mutex)
+{ (void)fd;(void)user_id;(void)match_id;(void)room_id;(void)json;(void)live;(void)db;(void)db_mutex; }
+
+static void handle_use_magnifying_glass(int fd, int user_id, int match_id, int room_id,
+                                         const char *json, client_list_t *live,
+                                         db_t *db, pthread_mutex_t *db_mutex)
+{ (void)fd;(void)user_id;(void)match_id;(void)room_id;(void)json;(void)live;(void)db;(void)db_mutex; }
+
+static void handle_use_handcuffs(int fd, int user_id, int match_id, int room_id,
+                                  const char *json, client_list_t *live,
+                                  db_t *db, pthread_mutex_t *db_mutex)
+{ (void)fd;(void)user_id;(void)match_id;(void)room_id;(void)json;(void)live;(void)db;(void)db_mutex; }
+
+static void handle_use_fire_axe(int fd, int user_id, int match_id, int room_id,
+                                 const char *json, client_list_t *live,
+                                 db_t *db, pthread_mutex_t *db_mutex)
+{ (void)fd;(void)user_id;(void)match_id;(void)room_id;(void)json;(void)live;(void)db;(void)db_mutex; }
+
+/* ── Dispatch ──────────────────────────────────────────────────────────────── */
 
 void handle_game_action(int fd, int user_id, const char *username,
                         int match_id, int room_id,
@@ -354,14 +824,25 @@ void handle_game_action(int fd, int user_id, const char *username,
     char action[32];
     json_str_copy(av, action, sizeof(action));
 
-    if (strcmp(action, ACTION_CHOOSE_CHAIR) == 0) {
-        handle_choose_chair(fd, user_id, username, match_id, room_id,
-                            json, live, db, db_mutex);
-    } else if (strcmp(action, ACTION_ROLL_DICE) == 0) {
-        handle_roll_dice(fd, user_id, match_id, room_id,
-                         json, live, db, db_mutex);
-    }
+    if      (strcmp(action, ACTION_CHOOSE_CHAIR)         == 0)
+        handle_choose_chair(fd, user_id, username, match_id, room_id, json, live, db, db_mutex);
+    else if (strcmp(action, ACTION_ROLL_DICE)            == 0)
+        handle_roll_dice(fd, user_id, match_id, room_id, json, live, db, db_mutex);
+    else if (strcmp(action, ACTION_MOVE_PIECE)           == 0)
+        handle_move_piece(fd, user_id, match_id, room_id, json, live, db, db_mutex);
+    else if (strcmp(action, ACTION_USE_GUN)              == 0)
+        handle_use_gun(fd, user_id, match_id, room_id, json, live, db, db_mutex);
+    else if (strcmp(action, ACTION_USE_CIGARETTE)        == 0)
+        handle_use_cigarette(fd, user_id, match_id, room_id, json, live, db, db_mutex);
+    else if (strcmp(action, ACTION_USE_MAGNIFYING_GLASS) == 0)
+        handle_use_magnifying_glass(fd, user_id, match_id, room_id, json, live, db, db_mutex);
+    else if (strcmp(action, ACTION_USE_HANDCUFFS)        == 0)
+        handle_use_handcuffs(fd, user_id, match_id, room_id, json, live, db, db_mutex);
+    else if (strcmp(action, ACTION_USE_FIRE_AXE)         == 0)
+        handle_use_fire_axe(fd, user_id, match_id, room_id, json, live, db, db_mutex);
 }
+
+/* ── Transport ─────────────────────────────────────────────────────────────── */
 
 void broadcast_game_action_to_room(client_list_t *live, int room_id,
                                    const char *json, int json_len)
@@ -375,8 +856,18 @@ void broadcast_game_action_to_room(client_list_t *live, int room_id,
     for (int i = 0; i < live->count; i++) {
         if (live->entries[i].room_id == room_id) {
             send(live->entries[i].socket_fd, header, sizeof(header), MSG_NOSIGNAL);
-            send(live->entries[i].socket_fd, json, (size_t)json_len, MSG_NOSIGNAL);
+            send(live->entries[i].socket_fd, json,  (size_t)json_len, MSG_NOSIGNAL);
         }
     }
     pthread_mutex_unlock(&live->mutex);
+}
+
+void send_game_action_to_fd(int fd, const char *json, int json_len)
+{
+    uint8_t  header[3];
+    uint16_t be_len = htons((uint16_t)json_len);
+    header[0] = MSG_GAME_ACTION;
+    memcpy(&header[1], &be_len, 2);
+    send(fd, header, sizeof(header), MSG_NOSIGNAL);
+    send(fd, json,   (size_t)json_len, MSG_NOSIGNAL);
 }
