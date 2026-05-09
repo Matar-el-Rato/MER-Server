@@ -178,10 +178,16 @@ int db_log_event(db_t *db, int match_id, int user_id,
     mysql_real_escape_string(db->conn, esc_type, event_type, strlen(event_type));
     mysql_real_escape_string(db->conn, esc_data, event_data, strlen(event_data));
     char query[1200];
-    snprintf(query, sizeof(query),
-        "INSERT INTO match_events (match_id, user_id, event_type, event_data)"
-        " VALUES (%d, %d, '%s', '%s')",
-        match_id, user_id, esc_type, esc_data);
+    if (user_id > 0)
+        snprintf(query, sizeof(query),
+            "INSERT INTO match_events (match_id, user_id, event_type, event_data)"
+            " VALUES (%d, %d, '%s', '%s')",
+            match_id, user_id, esc_type, esc_data);
+    else
+        snprintf(query, sizeof(query),
+            "INSERT INTO match_events (match_id, user_id, event_type, event_data)"
+            " VALUES (%d, NULL, '%s', '%s')",
+            match_id, esc_type, esc_data);
     if (mysql_query(db->conn, query)) {
         fprintf(stderr, "db_log_event error: %s\n", mysql_error(db->conn));
         return -1;

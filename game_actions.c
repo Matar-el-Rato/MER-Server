@@ -141,7 +141,7 @@ static void advance_turn(int room_id, int current_user_id, client_list_t *live,
     broadcast_game_action_to_room(live, room_id, json, len);
 
     pthread_mutex_lock(db_mutex);
-    db_log_event(db, match_id, 0, ACTION_TURN_START, json);
+    db_log_event(db, match_id, next_uid, ACTION_TURN_START, json);
     pthread_mutex_unlock(db_mutex);
 }
 
