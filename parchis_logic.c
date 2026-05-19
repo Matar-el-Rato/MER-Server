@@ -16,10 +16,10 @@ const int PARCHIS_GOAL[MAX_ROOM_PLAYERS]      = {118, 138, 108, 128};
 const int PARCHIS_SAFE[9] = {1, 12, 17, 29, 34, 46, 51, 63, 68};
 
 /* Golden square pools: one per quadrant, 12 candidates each.
- * Excludes safe squares and the 2 trapezoid squares per quadrant (8,9 / 24,25 / 42,43 / 59,60). */
+ * Excludes safe squares and the 2 trapezoid squares per quadrant (8,9 / 25,26 / 42,43 / 59,60). */
 const int PARCHIS_GOLDEN_POOL[4][12] = {
     { 1, 2, 3, 4, 6, 7, 10, 11, 13, 14, 15, 16 },   /* yellow quadrant */
-    {18,19,20,21,23,26, 27, 28, 30, 31, 32, 33 },   /* blue quadrant   */
+    {18,19,20,21,23,24, 27, 28, 30, 31, 32, 33 },   /* blue quadrant   */
     {35,36,37,38,40,41, 44, 45, 47, 48, 49, 50 },   /* red quadrant    */
     {52,53,54,55,57,58, 61, 62, 64, 65, 66, 67 },   /* green quadrant  */
 };
