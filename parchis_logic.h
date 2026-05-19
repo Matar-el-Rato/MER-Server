@@ -24,8 +24,8 @@ extern const int PARCHIS_GOAL[MAX_ROOM_PLAYERS];
 extern const int PARCHIS_SAFE[9];
 
 /* Golden-square candidate pools, one per quadrant [0..3] (yellow/blue/red/green quadrants).
- * Pool sizes are 14 each (range of 16 minus 2 excluded squares). */
-extern const int PARCHIS_GOLDEN_POOL[4][14];
+ * Pool sizes are 12 each (16-square range minus 2 safe squares and 2 trapezoid squares). */
+extern const int PARCHIS_GOLDEN_POOL[4][12];
 
 /* ── Position encoding ───────────────────────────────────────────────────────
  *  0          = house (waiting)

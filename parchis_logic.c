@@ -15,14 +15,13 @@ const int PARCHIS_GOAL[MAX_ROOM_PLAYERS]      = {118, 138, 108, 128};
 /* Universal safe squares — 9 total (corridor entrances + sq 1). */
 const int PARCHIS_SAFE[9] = {1, 12, 17, 29, 34, 46, 51, 63, 68};
 
-/* Golden square pools: one per quadrant, 14 candidates each.
- * Yellow quad 1-16 excl {5,12}; Blue quad 18-33 excl {22,29};
- * Red quad 35-50 excl {39,46}; Green quad 52-67 excl {56,63}. */
-const int PARCHIS_GOLDEN_POOL[4][14] = {
-    { 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16 },   /* yellow quadrant */
-    {18,19,20,21,23,24,25,26, 27, 28, 30, 31, 32, 33 },   /* blue quadrant   */
-    {35,36,37,38,40,41,42,43, 44, 45, 47, 48, 49, 50 },   /* red quadrant    */
-    {52,53,54,55,57,58,59,60, 61, 62, 64, 65, 66, 67 },   /* green quadrant  */
+/* Golden square pools: one per quadrant, 12 candidates each.
+ * Excludes safe squares and the 2 trapezoid squares per quadrant (8,9 / 24,25 / 42,43 / 59,60). */
+const int PARCHIS_GOLDEN_POOL[4][12] = {
+    { 1, 2, 3, 4, 6, 7, 10, 11, 13, 14, 15, 16 },   /* yellow quadrant */
+    {18,19,20,21,23,26, 27, 28, 30, 31, 32, 33 },   /* blue quadrant   */
+    {35,36,37,38,40,41, 44, 45, 47, 48, 49, 50 },   /* red quadrant    */
+    {52,53,54,55,57,58, 61, 62, 64, 65, 66, 67 },   /* green quadrant  */
 };
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -161,5 +160,5 @@ void parchis_random_golden_squares(int out_squares[4])
     if (!seeded) { srand((unsigned int)time(NULL)); seeded = 1; }
 
     for (int q = 0; q < 4; q++)
-        out_squares[q] = PARCHIS_GOLDEN_POOL[q][rand() % 14];
+        out_squares[q] = PARCHIS_GOLDEN_POOL[q][rand() % 12];
 }
