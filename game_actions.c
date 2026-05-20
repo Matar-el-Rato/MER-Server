@@ -586,9 +586,24 @@ static void handle_move_piece(int fd, int user_id,
     /* Apply the move. */
     gs->piece_positions[slot][piece_id] = to_sq;
 
-    /* Consume dice / bonus. */
+    /* Consume dice / bonus.
+     * 5+5 is a special case: it never grants a doubles re-roll.
+     * If the move was an exit from home, one 5 is kept so the player gets
+     * a second exit/move opportunity before the turn passes. */
+    bool second_five_pending = false;
     if (bonus_move) {
         gs->pending_movements[slot] = 0;
+    } else if (die1 == 5 && die2 == 5) {
+        if (is_exit) {
+            /* Keep the second 5 — player gets one more move. */
+            gs->pending_die1 = 5;
+            gs->pending_die2 = 0;
+            second_five_pending = true;
+        } else {
+            gs->pending_die1 = 0;
+            gs->pending_die2 = 0;
+        }
+        is_doubles = false; /* 5+5 never grants an extra roll */
     } else {
         gs->pending_die1 = 0;
         gs->pending_die2 = 0;
@@ -707,41 +722,41 @@ static void handle_move_piece(int fd, int user_id,
         static const char *ITEM_NAMES[] = {
             "gun", "cigarette", "magnifying_glass", "handcuffs", "fire_axe"
         };
-        /* 1-in-6 chance of empty; otherwise pick a random item player doesn't hold. */
-        int roll = rand() % 6;
-        char gold_json[192];
-        if (roll == 0) {
-            int glen = snprintf(gold_json, sizeof(gold_json),
-                "{\"action\":\"" ACTION_GOLDEN_SQUARE "\","
-                "\"user_id\":%d,\"square\":%d,\"roulette_result\":\"click\",\"item\":null}",
-                user_id, to_sq);
-            broadcast_game_action_to_room(live, room_id, gold_json, glen);
-        } else {
-            /* Try to give a random item the player doesn't have. */
-            pthread_mutex_lock(&g_game_mutex);
-            int item = -1;
-            for (int tries = 0; tries < NUM_ITEMS; tries++) {
-                int candidate = rand() % NUM_ITEMS;
-                if (!g_game_state[room_id].has_item[slot][candidate]) { item = candidate; break; }
-            }
-            if (item >= 0) g_game_state[room_id].has_item[slot][item] = true;
-            pthread_mutex_unlock(&g_game_mutex);
+        /* 6-sided roulette: faces 0-4 = items, face 5 = reroll. Cap at 20 spins. */
+        int spins[20];
+        int spin_count = 0;
+        int face;
+        do {
+            face = rand() % 6;
+            spins[spin_count++] = face;
+        } while (face == 5 && spin_count < 20);
+        if (face == 5) face = rand() % 5; /* safety cap: force an item */
 
-            if (item < 0) {
-                /* All items held — click. */
-                int glen = snprintf(gold_json, sizeof(gold_json),
-                    "{\"action\":\"" ACTION_GOLDEN_SQUARE "\","
-                    "\"user_id\":%d,\"square\":%d,\"roulette_result\":\"click\",\"item\":null}",
-                    user_id, to_sq);
-                broadcast_game_action_to_room(live, room_id, gold_json, glen);
-            } else {
-                int glen = snprintf(gold_json, sizeof(gold_json),
-                    "{\"action\":\"" ACTION_GOLDEN_SQUARE "\","
-                    "\"user_id\":%d,\"square\":%d,\"roulette_result\":\"item\",\"item\":\"%s\"}",
-                    user_id, to_sq, ITEM_NAMES[item]);
-                broadcast_game_action_to_room(live, room_id, gold_json, glen);
-            }
+        /* Grant item if player doesn't already hold it. */
+        pthread_mutex_lock(&g_game_mutex);
+        if (!g_game_state[room_id].has_item[slot][face])
+            g_game_state[room_id].has_item[slot][face] = true;
+        pthread_mutex_unlock(&g_game_mutex);
+
+        /* Build spins JSON array. "magnifying_glass"×20 + wrapper ≈ 520 bytes max. */
+        char gold_json[640];
+        int  gpos = 0;
+        gpos += snprintf(gold_json + gpos, sizeof(gold_json) - (size_t)gpos,
+            "{\"action\":\"" ACTION_GOLDEN_SQUARE "\","
+            "\"user_id\":%d,\"square\":%d,\"spins\":[",
+            user_id, to_sq);
+        for (int i = 0; i < spin_count; i++) {
+            const char *spin_name = (spins[i] == 5) ? "reroll" : ITEM_NAMES[spins[i]];
+            gpos += snprintf(gold_json + gpos, sizeof(gold_json) - (size_t)gpos,
+                "%s\"%s\"", i ? "," : "", spin_name);
         }
+        gpos += snprintf(gold_json + gpos, sizeof(gold_json) - (size_t)gpos,
+            "],\"final_item\":\"%s\"}", ITEM_NAMES[face]);
+
+        broadcast_game_action_to_room(live, room_id, gold_json, gpos);
+        pthread_mutex_lock(db_mutex);
+        db_log_event(db, match_id, user_id, ACTION_GOLDEN_SQUARE, gold_json);
+        pthread_mutex_unlock(db_mutex);
     }
 
     /* Determine turn flow. */
@@ -760,8 +775,39 @@ static void handle_move_piece(int fd, int user_id,
             "\"user_id\":%d,\"reason\":\"%s\",\"pending_movements\":%d}",
             user_id, reason, pending_mvs);
         broadcast_game_action_to_room(live, room_id, extra_json, elen);
+    } else if (second_five_pending) {
+        /* 5+5 exit: offer a second move using the remaining 5. */
+        pthread_mutex_lock(&g_game_mutex);
+        int  moveable2[4];
+        bool can_exit2;
+        int  n2 = parchis_moveable_pieces(slot, 5, 0,
+                                          g_game_state[room_id].piece_positions,
+                                          moveable2, &can_exit2);
+        pthread_mutex_unlock(&g_game_mutex);
+
+        if (n2 == 0) {
+            /* Nothing to do with the second 5 — clear it and pass the turn. */
+            pthread_mutex_lock(&g_game_mutex);
+            g_game_state[room_id].pending_die1 = 0;
+            pthread_mutex_unlock(&g_game_mutex);
+            advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+        } else {
+            char dice2_json[256];
+            int  d2len = 0;
+            d2len += snprintf(dice2_json + d2len, sizeof(dice2_json) - (size_t)d2len,
+                "{\"action\":\"" ACTION_DICE_RESULT "\","
+                "\"user_id\":%d,\"die1\":5,\"die2\":0,\"total\":5,"
+                "\"is_doubles\":false,\"consecutive_doubles\":0,"
+                "\"can_exit_house\":%s,\"moveable_pieces\":[",
+                user_id, can_exit2 ? "true" : "false");
+            for (int i = 0; i < n2; i++)
+                d2len += snprintf(dice2_json + d2len, sizeof(dice2_json) - (size_t)d2len,
+                    "%s%d", i ? "," : "", moveable2[i]);
+            d2len += snprintf(dice2_json + d2len, sizeof(dice2_json) - (size_t)d2len, "]}");
+            send_game_action_to_fd(fd, dice2_json, d2len);
+        }
     } else if (is_doubles) {
-        /* Doubles: player rolls again. */
+        /* Regular doubles (never 5+5): player rolls again. */
         char extra_json[128];
         int  elen = snprintf(extra_json, sizeof(extra_json),
             "{\"action\":\"" ACTION_EXTRA_TURN "\","
