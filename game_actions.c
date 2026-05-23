@@ -204,6 +204,9 @@ static void *turn_timer_thread(void *arg)
             nanosleep(&ts, NULL);
             if (g_timer_gen[room_id] != gen) return NULL;
         }
+        /* One final check after the sleep loop to close the 100ms window
+         * between loop exit and the broadcast/expiry action. */
+        if (g_timer_gen[room_id] != gen) return NULL;
 
         if (STAGES[s].remaining > 0) {
             /* Warning broadcast. */

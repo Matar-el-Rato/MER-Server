@@ -368,6 +368,7 @@ static void remove_client(int fd) {
     }
 
     if (cancel_match) {
+        turn_timer_cancel(was_in_room);
         pthread_mutex_lock(&g_db_mutex);
         db_cancel_match(db_ptr, cancel_match);
         pthread_mutex_unlock(&g_db_mutex);
@@ -645,6 +646,7 @@ static void *handle_live_connection(void *arg) {
             pthread_mutex_unlock(&g_live.mutex);
 
             if (cancel_match) {
+                turn_timer_cancel(left_room);
                 pthread_mutex_lock(&g_db_mutex);
                 db_cancel_match(db_ptr, cancel_match);
                 pthread_mutex_unlock(&g_db_mutex);
