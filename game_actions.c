@@ -144,11 +144,7 @@ static void advance_turn(int room_id, int current_user_id, client_list_t *live,
     db_log_event(db, match_id, next_uid, ACTION_TURN_START, json);
     pthread_mutex_unlock(db_mutex);
 
-    pthread_mutex_lock(&g_game_mutex);
-    int timer_ok = g_game_state[room_id].timer_enabled;
-    pthread_mutex_unlock(&g_game_mutex);
-    if (timer_ok)
-        turn_timer_start(room_id, match_id, next_uid, live, db, db_mutex);
+    turn_timer_start(room_id, match_id, next_uid, live, db, db_mutex);
 }
 
 /* ── Turn timer ──────────────────────────────────────────────────────────────
@@ -190,8 +186,8 @@ static void *turn_timer_thread(void *arg)
     /* Stages: { sleep_ms, seconds_remaining_to_broadcast }
      * remaining == 0 means this stage ends in expiry. */
     static const struct { int ms; int remaining; } STAGES[] = {
-        { 30000, 30 },
-        { 20000, 10 },
+        { 10000, 20 },
+        { 10000, 10 },
         {  5000,  5 },
         {  5000,  0 },
     };
@@ -568,9 +564,6 @@ static void handle_roll_dice(int fd, int user_id,
     }
     pthread_mutex_unlock(&g_turn_mutex);
 
-    /* Player acted in time — cancel the turn timer. */
-    turn_timer_cancel(room_id);
-
     int slot = user_id_to_slot(room_id, user_id);
     if (slot < 0) return;
 
@@ -688,6 +681,9 @@ static void handle_move_piece(int fd, int user_id,
     }
     pthread_mutex_unlock(&g_turn_mutex);
 
+    /* Player is committing a move — stop the turn clock. */
+    turn_timer_cancel(room_id);
+
     int slot = user_id_to_slot(room_id, user_id);
     if (slot < 0) return;
 
@@ -785,7 +781,6 @@ static void handle_move_piece(int fd, int user_id,
     bool barrier_formed = (pieces_at_to >= 2);
     bool barrier_broken = (from_sq > 0 && pieces_at_from == 1);  /* was 2, now 1 */
 
-    gs->timer_enabled = true;
     pthread_mutex_unlock(&g_game_mutex);
 
     /* Broadcast piece_moved. */
