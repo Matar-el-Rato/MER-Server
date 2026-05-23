@@ -115,6 +115,7 @@ typedef struct {
     bool peeked[MAX_ROOM_PLAYERS];
     int  peeked_die1[MAX_ROOM_PLAYERS];
     int  peeked_die2[MAX_ROOM_PLAYERS];
+    bool timer_enabled;
 } game_state_t;
 
 /* Per-room state arrays; index 0 unused, 1-NUM_ROOMS active. */

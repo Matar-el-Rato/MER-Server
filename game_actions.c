@@ -144,7 +144,11 @@ static void advance_turn(int room_id, int current_user_id, client_list_t *live,
     db_log_event(db, match_id, next_uid, ACTION_TURN_START, json);
     pthread_mutex_unlock(db_mutex);
 
-    turn_timer_start(room_id, match_id, next_uid, live, db, db_mutex);
+    pthread_mutex_lock(&g_game_mutex);
+    int timer_ok = g_game_state[room_id].timer_enabled;
+    pthread_mutex_unlock(&g_game_mutex);
+    if (timer_ok)
+        turn_timer_start(room_id, match_id, next_uid, live, db, db_mutex);
 }
 
 /* ── Turn timer ──────────────────────────────────────────────────────────────
@@ -774,6 +778,7 @@ static void handle_move_piece(int fd, int user_id,
     bool barrier_formed = (pieces_at_to >= 2);
     bool barrier_broken = (from_sq > 0 && pieces_at_from == 1);  /* was 2, now 1 */
 
+    gs->timer_enabled = true;
     pthread_mutex_unlock(&g_game_mutex);
 
     /* Broadcast piece_moved. */
