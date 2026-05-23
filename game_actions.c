@@ -225,11 +225,12 @@ static void *turn_timer_thread(void *arg)
             g_timer_gen[room_id]++;   /* consume this generation */
             pthread_mutex_unlock(&g_timer_mutex);
 
-            /* Guard: skip penalty if the game is no longer active. */
+            /* Guard: skip penalty if the game is no longer active or belongs to a different match. */
             pthread_mutex_lock(&g_game_mutex);
-            int active = g_game_state[room_id].active;
+            int active   = g_game_state[room_id].active;
+            int cur_mid  = g_game_state[room_id].match_id;
             pthread_mutex_unlock(&g_game_mutex);
-            if (!active) return NULL;
+            if (!active || cur_mid != match_id) return NULL;
 
             /* Broadcast expiry. */
             char json[256];
@@ -339,6 +340,9 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
     for (int i = 0; i < turn_count; i++)
         g_turn_state[room_id].turn_order[i] = turn_order[i];
     pthread_mutex_unlock(&g_turn_mutex);
+
+    /* Kill any lingering timer from a previous match before touching game state. */
+    turn_timer_cancel(room_id);
 
     /* Initialise game state for this room. */
     pthread_mutex_lock(&g_game_mutex);
