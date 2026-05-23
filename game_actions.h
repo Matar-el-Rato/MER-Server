@@ -44,6 +44,11 @@
 #define ACTION_LIFE_LOST            "life_lost"
 #define ACTION_PLAYER_ELIMINATED    "player_eliminated"
 #define ACTION_GAME_OVER            "game_over"
+#define ACTION_TURN_TIMER_WARNING   "turn_timer_warning"
+#define ACTION_TURN_TIMER_EXPIRED   "turn_timer_expired"
+
+/* Turn timer: 60 s total, warnings at 30 / 10 / 5 s remaining. */
+#define TURN_TIMER_SECS             60
 
 /* Server → Single client action strings (private MSG_GAME_ACTION) */
 #define ACTION_GUN_AVAILABLE        "gun_available"
@@ -143,5 +148,14 @@ void send_game_action_to_fd(int fd, const char *json, int json_len);
 
 /* Returns the slot index (0-3) for a given user_id in a room, or -1. */
 int user_id_to_slot(int room_id, int user_id);
+
+/* Turn timer: start a 60-second countdown for the given player's turn.
+ * Broadcasts warnings at 30/10/5 s remaining; on expiry removes one life
+ * and advances the turn. Automatically cancels any prior timer for the room. */
+void turn_timer_start(int room_id, int match_id, int user_id,
+                      client_list_t *live, db_t *db, pthread_mutex_t *db_mutex);
+
+/* Cancel the running turn timer for a room (player acted in time). */
+void turn_timer_cancel(int room_id);
 
 #endif /* GAME_ACTIONS_H */

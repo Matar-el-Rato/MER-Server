@@ -143,6 +143,155 @@ static void advance_turn(int room_id, int current_user_id, client_list_t *live,
     pthread_mutex_lock(db_mutex);
     db_log_event(db, match_id, next_uid, ACTION_TURN_START, json);
     pthread_mutex_unlock(db_mutex);
+
+    turn_timer_start(room_id, match_id, next_uid, live, db, db_mutex);
+}
+
+/* ── Turn timer ──────────────────────────────────────────────────────────────
+ *
+ * One detached pthread per room.  Cancel is implemented by bumping a per-room
+ * generation counter (g_timer_gen).  The running thread polls every 100 ms and
+ * exits silently if its captured generation no longer matches the current one.
+ * This avoids any join / condvar complexity and is safe even when the timer
+ * thread itself fires advance_turn() which re-arms the timer for the next player.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+typedef struct {
+    int             gen;
+    int             room_id;
+    int             match_id;
+    int             user_id;
+    client_list_t  *live;
+    db_t           *db;
+    pthread_mutex_t *db_mutex;
+} turn_timer_args_t;
+
+static volatile int    g_timer_gen[NUM_ROOMS + 1];  /* bump = cancel           */
+static pthread_mutex_t g_timer_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void *turn_timer_thread(void *arg)
+{
+    turn_timer_args_t *a = (turn_timer_args_t *)arg;
+
+    /* Copy everything to locals; free the heap args immediately. */
+    int             room_id  = a->room_id;
+    int             match_id = a->match_id;
+    int             user_id  = a->user_id;
+    int             gen      = a->gen;
+    client_list_t  *live     = a->live;
+    db_t           *db       = a->db;
+    pthread_mutex_t *db_mutex = a->db_mutex;
+    free(a);
+
+    /* Stages: { sleep_ms, seconds_remaining_to_broadcast }
+     * remaining == 0 means this stage ends in expiry. */
+    static const struct { int ms; int remaining; } STAGES[] = {
+        { 30000, 30 },
+        { 20000, 10 },
+        {  5000,  5 },
+        {  5000,  0 },
+    };
+
+    for (int s = 0; s < 4; s++) {
+        /* Poll in 100 ms chunks so cancellation is noticed quickly. */
+        int chunks = STAGES[s].ms / 100;
+        for (int t = 0; t < chunks; t++) {
+            struct timespec ts = { 0, 100000000L };
+            nanosleep(&ts, NULL);
+            if (g_timer_gen[room_id] != gen) return NULL;
+        }
+
+        if (STAGES[s].remaining > 0) {
+            /* Warning broadcast. */
+            char json[128];
+            int  len = snprintf(json, sizeof(json),
+                "{\"action\":\"" ACTION_TURN_TIMER_WARNING "\","
+                "\"user_id\":%d,\"seconds_remaining\":%d}",
+                user_id, STAGES[s].remaining);
+            broadcast_game_action_to_room(live, room_id, json, len);
+
+        } else {
+            /* Expiry: claim the generation under the mutex to prevent a
+             * simultaneous cancel from also applying a penalty. */
+            pthread_mutex_lock(&g_timer_mutex);
+            if (g_timer_gen[room_id] != gen) {
+                pthread_mutex_unlock(&g_timer_mutex);
+                return NULL;
+            }
+            g_timer_gen[room_id]++;   /* consume this generation */
+            pthread_mutex_unlock(&g_timer_mutex);
+
+            /* Guard: skip penalty if the game is no longer active. */
+            pthread_mutex_lock(&g_game_mutex);
+            int active = g_game_state[room_id].active;
+            pthread_mutex_unlock(&g_game_mutex);
+            if (!active) return NULL;
+
+            /* Broadcast expiry. */
+            char json[256];
+            int  len = snprintf(json, sizeof(json),
+                "{\"action\":\"" ACTION_TURN_TIMER_EXPIRED "\",\"user_id\":%d}",
+                user_id);
+            broadcast_game_action_to_room(live, room_id, json, len);
+
+            /* Deduct one life. */
+            int slot = user_id_to_slot(room_id, user_id);
+            if (slot >= 0) {
+                pthread_mutex_lock(&g_game_mutex);
+                g_game_state[room_id].life_charges[slot]--;
+                int lives = g_game_state[room_id].life_charges[slot];
+                pthread_mutex_unlock(&g_game_mutex);
+
+                len = snprintf(json, sizeof(json),
+                    "{\"action\":\"" ACTION_LIFE_LOST "\","
+                    "\"user_id\":%d,\"lives_remaining\":%d,\"reason\":\"timeout\"}",
+                    user_id, lives);
+                broadcast_game_action_to_room(live, room_id, json, len);
+
+                pthread_mutex_lock(db_mutex);
+                db_log_event(db, match_id, user_id, ACTION_LIFE_LOST, json);
+                pthread_mutex_unlock(db_mutex);
+            }
+
+            /* Skip to the next player (re-arms the timer for them). */
+            advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+        }
+    }
+    return NULL;
+}
+
+void turn_timer_cancel(int room_id)
+{
+    pthread_mutex_lock(&g_timer_mutex);
+    g_timer_gen[room_id]++;
+    pthread_mutex_unlock(&g_timer_mutex);
+    /* Running thread notices within ≤100 ms and exits silently. */
+}
+
+void turn_timer_start(int room_id, int match_id, int user_id,
+                      client_list_t *live, db_t *db, pthread_mutex_t *db_mutex)
+{
+    pthread_mutex_lock(&g_timer_mutex);
+    g_timer_gen[room_id]++;           /* cancel any timer already running    */
+    int gen = g_timer_gen[room_id];   /* capture generation for new thread   */
+    pthread_mutex_unlock(&g_timer_mutex);
+
+    turn_timer_args_t *args = malloc(sizeof(*args));
+    if (!args) return;
+    args->gen      = gen;
+    args->room_id  = room_id;
+    args->match_id = match_id;
+    args->user_id  = user_id;
+    args->live     = live;
+    args->db       = db;
+    args->db_mutex = db_mutex;
+
+    pthread_t t;
+    if (pthread_create(&t, NULL, turn_timer_thread, args) != 0) {
+        free(args);
+        return;
+    }
+    pthread_detach(t);
 }
 
 /* ── Initiative sequence ───────────────────────────────────────────────────── */
@@ -407,6 +556,9 @@ static void handle_roll_dice(int fd, int user_id,
         return;
     }
     pthread_mutex_unlock(&g_turn_mutex);
+
+    /* Player acted in time — cancel the turn timer. */
+    turn_timer_cancel(room_id);
 
     int slot = user_id_to_slot(room_id, user_id);
     if (slot < 0) return;
@@ -707,6 +859,11 @@ static void handle_move_piece(int fd, int user_id,
                 "{\"action\":\"" ACTION_GAME_OVER "\","
                 "\"winner_user_id\":%d,\"reason\":\"race\"}", user_id);
             broadcast_game_action_to_room(live, room_id, win_json, wlen);
+
+            pthread_mutex_lock(&g_game_mutex);
+            g_game_state[room_id].active = false;
+            pthread_mutex_unlock(&g_game_mutex);
+            turn_timer_cancel(room_id);
             return;
         }
     }
@@ -822,6 +979,9 @@ static void handle_move_piece(int fd, int user_id,
             "\"consecutive_doubles\":%d,\"pending_movements\":0}",
             user_id, g_game_state[room_id].consecutive_doubles[slot]);
         broadcast_game_action_to_room(live, room_id, ts_json, tslen);
+
+        /* Fresh 60 s for the same player's bonus roll. */
+        turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
     } else {
         advance_turn(room_id, user_id, live, db, db_mutex, match_id);
     }
