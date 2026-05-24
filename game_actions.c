@@ -754,15 +754,16 @@ static void handle_move_piece(int fd, int user_id,
         gs->pending_movements[slot] = 0;
     } else if (die1 == 5 && die2 == 5) {
         if (is_exit) {
-            /* Keep the second 5 — player gets one more move. */
+            /* Keep the second 5 — player gets one more move instead of a re-roll. */
             gs->pending_die1 = 5;
             gs->pending_die2 = 0;
             second_five_pending = true;
+            is_doubles = false;
         } else {
             gs->pending_die1 = 0;
             gs->pending_die2 = 0;
+            /* is_doubles stays true → non-exit 5+5 grants a re-roll like regular doubles */
         }
-        is_doubles = false; /* 5+5 never grants an extra roll */
     } else {
         gs->pending_die1 = 0;
         gs->pending_die2 = 0;
