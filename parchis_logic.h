@@ -20,8 +20,8 @@ extern const int PARCHIS_CORR_BASE[MAX_ROOM_PLAYERS];
 /* Goal square (step 8, piece is finished). */
 extern const int PARCHIS_GOAL[MAX_ROOM_PLAYERS];
 
-/* Universal safe squares — cannot be captured here (9 squares). */
-extern const int PARCHIS_SAFE[9];
+/* Universal safe squares — cannot be captured here (11 squares). */
+extern const int PARCHIS_SAFE[11];
 
 /* Golden-square candidate pools, one per quadrant [0..3] (yellow/blue/red/green quadrants).
  * Pool sizes are 12 each (16-square range minus 2 safe squares and 2 trapezoid squares). */

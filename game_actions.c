@@ -734,6 +734,10 @@ static void handle_move_piece(int fd, int user_id,
         }
         to_sq = parchis_advance(slot, from_sq, steps);
         if (to_sq < 0) { pthread_mutex_unlock(&g_game_mutex); return; }
+        if (!parchis_path_clear(slot, from_sq, steps, gs->piece_positions)) {
+            pthread_mutex_unlock(&g_game_mutex);
+            return;
+        }
     } else if (from_sq == 0) {
         /* Exit from home — need a 5 die. */
         if (die1 != 5 && die2 != 5 && (die1 + die2) != 5) {
@@ -753,13 +757,28 @@ static void handle_move_piece(int fd, int user_id,
         }
     }
 
-    /* Verify landing is allowed (no enemy barrier). */
-    bool enemy_barrier = false;
-    for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
-        if (s == slot) continue;
-        if (parchis_is_barrier(to_sq, s, gs->piece_positions)) { enemy_barrier = true; break; }
+    /* Verify landing is allowed.
+     * Own spawn square: native color always has priority (will eat enemies).
+     * Safe square: 2+ non-mover pieces of any colors form a blocking barrier.
+     * Non-safe square: same-color enemy barrier blocks landing. */
+    bool blocked = false;
+    if (to_sq != PARCHIS_EXIT[slot]) {
+        if (parchis_is_safe(to_sq, slot)) {
+            int occ = 0;
+            for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
+                if (s == slot) continue;
+                for (int p = 0; p < 4; p++)
+                    if (gs->piece_positions[s][p] == to_sq) occ++;
+            }
+            blocked = (occ >= 2);
+        } else {
+            for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
+                if (s == slot) continue;
+                if (parchis_is_barrier(to_sq, s, gs->piece_positions)) { blocked = true; break; }
+            }
+        }
     }
-    if (enemy_barrier) { pthread_mutex_unlock(&g_game_mutex); return; }
+    if (blocked) { pthread_mutex_unlock(&g_game_mutex); return; }
 
     /* Apply the move. */
     gs->piece_positions[slot][piece_id] = to_sq;
@@ -840,9 +859,10 @@ static void handle_move_piece(int fd, int user_id,
         broadcast_game_action_to_room(live, room_id, bar_json, blen);
     }
 
-    /* Captures — land on non-safe square with enemy pieces (not a barrier). */
+    /* Captures — land on non-safe square, OR on own spawn square (priority eats enemies). */
+    bool spawn_priority = (to_sq == PARCHIS_EXIT[slot]);
     int  captured_count = 0;
-    if (!on_safe && !parchis_is_goal(to_sq)) {
+    if ((!on_safe || spawn_priority) && !parchis_is_goal(to_sq)) {
         for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
             if (s == slot) continue;
             for (int p = 0; p < 4; p++) {

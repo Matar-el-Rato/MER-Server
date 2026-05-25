@@ -12,8 +12,8 @@ const int PARCHIS_ENTRY[MAX_ROOM_PLAYERS]     = {17, 51, 68, 34};
 const int PARCHIS_CORR_BASE[MAX_ROOM_PLAYERS] = {111, 131, 101, 121};
 const int PARCHIS_GOAL[MAX_ROOM_PLAYERS]      = {118, 138, 108, 128};
 
-/* Universal safe squares — 9 total (corridor entrances + sq 1). */
-const int PARCHIS_SAFE[9] = {1, 12, 17, 29, 34, 46, 51, 63, 68};
+/* Universal safe squares — 11 total (exit/spawn squares + corridor entrances). */
+const int PARCHIS_SAFE[11] = {5, 12, 17, 22, 29, 34, 39, 46, 51, 56, 63};
 
 /* Golden square pools: one per quadrant, 12 candidates each.
  * Excludes safe squares and the 2 trapezoid squares per quadrant (8,9 / 25,26 / 42,43 / 59,60). */
@@ -70,11 +70,17 @@ int parchis_advance(int slot, int from_sq, int steps)
     }
 }
 
+static bool is_safe_sq(int sq)
+{
+    for (int i = 0; i < 11; i++)
+        if (PARCHIS_SAFE[i] == sq) return true;
+    return false;
+}
+
 bool parchis_is_safe(int sq, int mover_slot)
 {
-    for (int i = 0; i < 9; i++)
-        if (PARCHIS_SAFE[i] == sq) return true;
-    return sq == PARCHIS_EXIT[mover_slot];
+    (void)mover_slot; /* all safe squares are now universal; exit squares are in the list */
+    return is_safe_sq(sq);
 }
 
 bool parchis_is_barrier(int sq, int blocker_slot, int positions[][4])
@@ -93,9 +99,7 @@ bool parchis_path_clear(int mover_slot, int from_sq, int steps, int positions[][
     int corrBase = PARCHIS_CORR_BASE[mover_slot];
     int pos      = from_sq;
 
-    /* Walk each intermediate step (skip the final destination). */
     for (int i = 0; i < steps - 1; i++) {
-        /* Advance pos by one step */
         if (pos >= 100) {
             pos = corr_step(pos);
         } else if (pos == entry) {
@@ -104,19 +108,43 @@ bool parchis_path_clear(int mover_slot, int from_sq, int steps, int positions[][
             pos = ring_step(pos);
         }
 
-        /* Check for an enemy barrier at this intermediate square. */
-        for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
-            if (s == mover_slot) continue;
-            if (parchis_is_barrier(pos, s, positions)) return false;
+        if (is_safe_sq(pos)) {
+            /* Safe square: mixed barrier (2+ non-mover pieces of any colors) blocks passage. */
+            int occ = 0;
+            for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
+                if (s == mover_slot) continue;
+                for (int p = 0; p < 4; p++)
+                    if (positions[s][p] == pos) occ++;
+            }
+            if (occ >= 2) return false;
+        } else {
+            /* Non-safe square: same-color barrier blocks passage. */
+            for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
+                if (s == mover_slot) continue;
+                if (parchis_is_barrier(pos, s, positions)) return false;
+            }
         }
     }
     return true;
 }
 
-/* True if mover can land on sq (not an enemy barrier). */
+/* True if mover can land on sq. */
 static bool can_land(int sq, int mover_slot, int positions[][4])
 {
-    if (sq == 0) return false; /* home is never a landing target */
+    if (sq == 0) return false;
+    /* Own spawn square: native color always has landing priority (will eat enemies). */
+    if (sq == PARCHIS_EXIT[mover_slot]) return true;
+    /* Safe square: any 2+ non-mover pieces (mixed colors) form a blocking barrier. */
+    if (is_safe_sq(sq)) {
+        int occ = 0;
+        for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
+            if (s == mover_slot) continue;
+            for (int p = 0; p < 4; p++)
+                if (positions[s][p] == sq) occ++;
+        }
+        return occ < 2;
+    }
+    /* Non-safe square: same-color enemy barrier blocks landing. */
     for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
         if (s == mover_slot) continue;
         if (parchis_is_barrier(sq, s, positions)) return false;
