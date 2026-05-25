@@ -102,7 +102,8 @@ typedef struct {
     /* Current-turn state */
     int  pending_die1;                    /* stored after roll_dice        */
     int  pending_die2;
-    int  pending_movements[MAX_ROOM_PLAYERS]; /* bonus steps from captures/goals */
+    int  pending_movements[MAX_ROOM_PLAYERS];    /* bonus steps from captures/goals */
+    bool pending_doubles_reroll[MAX_ROOM_PLAYERS]; /* doubles reroll deferred past bonus moves */
 
     /* Per-player persistent state */
     int  consecutive_doubles[MAX_ROOM_PLAYERS];

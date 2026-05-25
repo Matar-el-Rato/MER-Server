@@ -619,8 +619,9 @@ static void handle_roll_dice(int fd, int user_id,
     }
 
     /* Store dice for handle_move_piece to consume. */
-    gs->pending_die1 = die1;
-    gs->pending_die2 = die2;
+    gs->pending_die1               = die1;
+    gs->pending_die2               = die2;
+    gs->pending_doubles_reroll[slot] = false; /* clear any stale flag from a previous turn */
 
     /* Compute moveable pieces. */
     int moveable[4];
@@ -653,9 +654,27 @@ static void handle_roll_dice(int fd, int user_id,
     db_log_event(db, match_id, user_id, ACTION_ROLL_DICE, result_json);
     pthread_mutex_unlock(db_mutex);
 
-    /* No moveable pieces → auto-pass. */
+    /* No moveable pieces → doubles grant a reroll; otherwise auto-pass. */
     if (n_moveable == 0) {
-        advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+        if (is_doubles) {
+            char extra_json[128];
+            int  elen = snprintf(extra_json, sizeof(extra_json),
+                "{\"action\":\"" ACTION_EXTRA_TURN "\","
+                "\"user_id\":%d,\"reason\":\"doubles\",\"pending_movements\":0}",
+                user_id);
+            broadcast_game_action_to_room(live, room_id, extra_json, elen);
+
+            char ts_json[128];
+            int  tslen = snprintf(ts_json, sizeof(ts_json),
+                "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d,"
+                "\"consecutive_doubles\":%d,\"pending_movements\":0}",
+                user_id, consec);
+            broadcast_game_action_to_room(live, room_id, ts_json, tslen);
+
+            turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
+        } else {
+            advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+        }
     }
 }
 
@@ -930,7 +949,13 @@ static void handle_move_piece(int fd, int user_id,
     pthread_mutex_unlock(&g_game_mutex);
 
     if (pending_mvs > 0) {
-        /* Extra move from capture/goal bonus. */
+        /* Extra move from capture/goal bonus.
+         * If this was a doubles move, remember the reroll — it fires after the bonus is used. */
+        if (is_doubles) {
+            pthread_mutex_lock(&g_game_mutex);
+            g_game_state[room_id].pending_doubles_reroll[slot] = true;
+            pthread_mutex_unlock(&g_game_mutex);
+        }
         const char *reason = (captured_count > 0 && !scored_goal) ? "capture_bonus"
                            : (scored_goal && captured_count == 0)  ? "goal_bonus"
                            : "capture_bonus";
@@ -991,7 +1016,32 @@ static void handle_move_piece(int fd, int user_id,
         /* Fresh 60 s for the same player's bonus roll. */
         turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
     } else {
-        advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+        /* Check for a doubles reroll that was deferred past a capture/goal bonus. */
+        pthread_mutex_lock(&g_game_mutex);
+        bool deferred = g_game_state[room_id].pending_doubles_reroll[slot];
+        if (deferred) g_game_state[room_id].pending_doubles_reroll[slot] = false;
+        int deferred_consec = g_game_state[room_id].consecutive_doubles[slot];
+        pthread_mutex_unlock(&g_game_mutex);
+
+        if (deferred) {
+            char extra_json[128];
+            int  elen = snprintf(extra_json, sizeof(extra_json),
+                "{\"action\":\"" ACTION_EXTRA_TURN "\","
+                "\"user_id\":%d,\"reason\":\"doubles\",\"pending_movements\":0}",
+                user_id);
+            broadcast_game_action_to_room(live, room_id, extra_json, elen);
+
+            char ts_json[128];
+            int  tslen = snprintf(ts_json, sizeof(ts_json),
+                "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d,"
+                "\"consecutive_doubles\":%d,\"pending_movements\":0}",
+                user_id, deferred_consec);
+            broadcast_game_action_to_room(live, room_id, ts_json, tslen);
+
+            turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
+        } else {
+            advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+        }
     }
 }
 
