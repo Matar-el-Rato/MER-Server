@@ -718,13 +718,15 @@ static void handle_move_piece(int fd, int user_id,
         return;
     }
 
-    int from_sq     = gs->piece_positions[slot][piece_id];
-    int die1        = gs->pending_die1;
-    int die2        = gs->pending_die2;
-    bool is_doubles = (die1 == die2 && die1 > 0);
+    int from_sq      = gs->piece_positions[slot][piece_id];
+    int die1         = gs->pending_die1;
+    int die2         = gs->pending_die2;
+    bool is_doubles  = (die1 == die2 && die1 > 0);
     int to_sq;
-    bool is_exit    = false;
-    int total_steps = 0; /* included in piece_moved so the client can animate bounces */
+    bool is_exit     = false;
+    int total_steps  = 0; /* included in piece_moved so the client can animate bounces */
+    int exit_remainder  = 0; /* non-5 die kept after a 5+X exit                        */
+    int second_move_die = 0; /* 0=none, else=die value for the second move after exit   */
 
     if (bonus_move) {
         /* Extra move using pending_movements only. */
@@ -749,6 +751,9 @@ static void handle_move_piece(int fd, int user_id,
         to_sq       = PARCHIS_EXIT[slot];
         is_exit     = true;
         total_steps = 5;
+        /* Compute remaining die for 5+X case (not 5+5, not total-of-5). */
+        if      (die1 == 5 && die2 > 0 && die2 != 5) exit_remainder = die2;
+        else if (die2 == 5 && die1 > 0 && die1 != 5) exit_remainder = die1;
     } else {
         int steps   = die1 + die2;
         total_steps = steps;
@@ -788,24 +793,30 @@ static void handle_move_piece(int fd, int user_id,
     gs->piece_positions[slot][piece_id] = to_sq;
 
     /* Consume dice / bonus.
-     * 5+5 is a special case: it never grants a doubles re-roll.
-     * If the move was an exit from home, one 5 is kept so the player gets
-     * a second exit/move opportunity before the turn passes. */
-    bool second_five_pending = false;
+     * 5+5: if exit taken, keep second 5 for a second move and owe a reroll after.
+     *       if no exit, is_doubles stays true → grants re-roll like regular doubles.
+     * 5+X: if exit taken with the 5, keep X for a second move (no reroll). */
     if (bonus_move) {
         gs->pending_movements[slot] = 0;
     } else if (die1 == 5 && die2 == 5) {
         if (is_exit) {
-            /* Keep the second 5 — player gets one more move instead of a re-roll. */
+            /* Keep the second 5; a reroll is owed after both 5s are consumed. */
             gs->pending_die1 = 5;
             gs->pending_die2 = 0;
-            second_five_pending = true;
+            gs->pending_five_reroll[slot] = true;
+            second_move_die = 5;
             is_doubles = false;
         } else {
             gs->pending_die1 = 0;
             gs->pending_die2 = 0;
             /* is_doubles stays true → non-exit 5+5 grants a re-roll like regular doubles */
         }
+    } else if (is_exit && exit_remainder > 0) {
+        /* 5+X exit: keep the non-5 die for a second move (no reroll). */
+        gs->pending_die1 = exit_remainder;
+        gs->pending_die2 = 0;
+        second_move_die = exit_remainder;
+        is_doubles = false;
     } else {
         gs->pending_die1 = 0;
         gs->pending_die2 = 0;
@@ -989,31 +1000,50 @@ static void handle_move_piece(int fd, int user_id,
             "\"user_id\":%d,\"reason\":\"%s\",\"pending_movements\":%d}",
             user_id, reason, pending_mvs);
         broadcast_game_action_to_room(live, room_id, extra_json, elen);
-    } else if (second_five_pending) {
-        /* 5+5 exit: offer a second move using the remaining 5. */
+    } else if (second_move_die > 0) {
+        /* Second move after exit (5+5 or 5+X): offer remaining die to the mover. */
         pthread_mutex_lock(&g_game_mutex);
         int  moveable2[4];
         bool can_exit2;
-        int  n2 = parchis_moveable_pieces(slot, 5, 0,
+        int  n2 = parchis_moveable_pieces(slot, second_move_die, 0,
                                           g_game_state[room_id].piece_positions,
                                           moveable2, &can_exit2);
         pthread_mutex_unlock(&g_game_mutex);
 
         if (n2 == 0) {
-            /* Nothing to do with the second 5 — clear it and pass the turn. */
+            /* Nothing to move — clear pending die, check for owed reroll. */
             pthread_mutex_lock(&g_game_mutex);
             g_game_state[room_id].pending_die1 = 0;
+            bool five_reroll = g_game_state[room_id].pending_five_reroll[slot];
+            if (five_reroll) g_game_state[room_id].pending_five_reroll[slot] = false;
             pthread_mutex_unlock(&g_game_mutex);
-            advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+            if (five_reroll) {
+                char extra_json[128];
+                int  elen = snprintf(extra_json, sizeof(extra_json),
+                    "{\"action\":\"" ACTION_EXTRA_TURN "\","
+                    "\"user_id\":%d,\"reason\":\"doubles\",\"pending_movements\":0}",
+                    user_id);
+                broadcast_game_action_to_room(live, room_id, extra_json, elen);
+                char ts_json[128];
+                int  tslen = snprintf(ts_json, sizeof(ts_json),
+                    "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d,"
+                    "\"consecutive_doubles\":%d,\"pending_movements\":0}",
+                    user_id, g_game_state[room_id].consecutive_doubles[slot]);
+                broadcast_game_action_to_room(live, room_id, ts_json, tslen);
+                turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
+            } else {
+                advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+            }
         } else {
             char dice2_json[256];
             int  d2len = 0;
             d2len += snprintf(dice2_json + d2len, sizeof(dice2_json) - (size_t)d2len,
                 "{\"action\":\"" ACTION_DICE_RESULT "\","
-                "\"user_id\":%d,\"die1\":5,\"die2\":0,\"total\":5,"
+                "\"user_id\":%d,\"die1\":%d,\"die2\":0,\"total\":%d,"
                 "\"is_doubles\":false,\"consecutive_doubles\":0,"
                 "\"can_exit_house\":%s,\"moveable_pieces\":[",
-                user_id, can_exit2 ? "true" : "false");
+                user_id, second_move_die, second_move_die,
+                can_exit2 ? "true" : "false");
             for (int i = 0; i < n2; i++)
                 d2len += snprintf(dice2_json + d2len, sizeof(dice2_json) - (size_t)d2len,
                     "%s%d", i ? "," : "", moveable2[i]);
@@ -1040,14 +1070,16 @@ static void handle_move_piece(int fd, int user_id,
         /* Fresh 60 s for the same player's bonus roll. */
         turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
     } else {
-        /* Check for a doubles reroll that was deferred past a capture/goal bonus. */
+        /* Check for deferred doubles reroll (past bonus) or 5+5-exit reroll. */
         pthread_mutex_lock(&g_game_mutex);
-        bool deferred = g_game_state[room_id].pending_doubles_reroll[slot];
-        if (deferred) g_game_state[room_id].pending_doubles_reroll[slot] = false;
+        bool deferred    = g_game_state[room_id].pending_doubles_reroll[slot];
+        if (deferred)    g_game_state[room_id].pending_doubles_reroll[slot] = false;
+        bool five_reroll = g_game_state[room_id].pending_five_reroll[slot];
+        if (five_reroll) g_game_state[room_id].pending_five_reroll[slot] = false;
         int deferred_consec = g_game_state[room_id].consecutive_doubles[slot];
         pthread_mutex_unlock(&g_game_mutex);
 
-        if (deferred) {
+        if (deferred || five_reroll) {
             char extra_json[128];
             int  elen = snprintf(extra_json, sizeof(extra_json),
                 "{\"action\":\"" ACTION_EXTRA_TURN "\","
