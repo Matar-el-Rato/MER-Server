@@ -48,7 +48,13 @@ int parchis_advance(int slot, int from_sq, int steps)
         /* Already in corridor; step = from_sq - corrBase + 1 (1-indexed) */
         int corrStep = from_sq - corrBase + 1;
         int newStep  = corrStep + steps;
-        if (newStep > 8) return -1;  /* overshoot past goal */
+        if (newStep > 8) {
+            /* Overshoot: bounce back from goal. */
+            int overshoot  = newStep - 8;
+            int bounceStep = 8 - overshoot;
+            if (bounceStep < 1) return -1; /* too far to bounce back within corridor */
+            return corrBase + bounceStep - 1;
+        }
         return corrBase + newStep - 1;
     }
 
@@ -65,7 +71,13 @@ int parchis_advance(int slot, int from_sq, int steps)
     } else {
         /* Enters corridor */
         int remaining = steps - stepsToEntry;
-        if (remaining > 8) return -1;  /* overshoot past goal */
+        if (remaining > 8) {
+            /* Overshoot: bounce back from goal. */
+            int overshoot  = remaining - 8;
+            int bounceStep = 8 - overshoot;
+            if (bounceStep < 1) return -1; /* too far to bounce back within corridor */
+            return corrBase + bounceStep - 1;
+        }
         return corrBase + remaining - 1;
     }
 }

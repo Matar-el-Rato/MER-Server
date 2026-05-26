@@ -718,16 +718,18 @@ static void handle_move_piece(int fd, int user_id,
         return;
     }
 
-    int from_sq = gs->piece_positions[slot][piece_id];
-    int die1    = gs->pending_die1;
-    int die2    = gs->pending_die2;
+    int from_sq     = gs->piece_positions[slot][piece_id];
+    int die1        = gs->pending_die1;
+    int die2        = gs->pending_die2;
     bool is_doubles = (die1 == die2 && die1 > 0);
     int to_sq;
-    bool is_exit = false;
+    bool is_exit    = false;
+    int total_steps = 0; /* included in piece_moved so the client can animate bounces */
 
     if (bonus_move) {
         /* Extra move using pending_movements only. */
         int steps = gs->pending_movements[slot];
+        total_steps = steps;
         if (from_sq == 0) {
             pthread_mutex_unlock(&g_game_mutex);
             return; /* can't use bonus to exit home */
@@ -744,10 +746,12 @@ static void handle_move_piece(int fd, int user_id,
             pthread_mutex_unlock(&g_game_mutex);
             return;
         }
-        to_sq    = PARCHIS_EXIT[slot];
-        is_exit  = true;
+        to_sq       = PARCHIS_EXIT[slot];
+        is_exit     = true;
+        total_steps = 5;
     } else {
-        int steps = die1 + die2;
+        int steps   = die1 + die2;
+        total_steps = steps;
         to_sq = parchis_advance(slot, from_sq, steps);
         if (to_sq < 0) { pthread_mutex_unlock(&g_game_mutex); return; }
 
@@ -827,8 +831,8 @@ static void handle_move_piece(int fd, int user_id,
     int  mlen = snprintf(moved_json, sizeof(moved_json),
         "{\"action\":\"" ACTION_PIECE_MOVED "\","
         "\"user_id\":%d,\"piece_id\":%d,\"from\":%d,\"to\":%d,"
-        "\"is_exit\":%s,\"on_safe_square\":%s}",
-        user_id, piece_id, from_sq, to_sq,
+        "\"steps\":%d,\"is_exit\":%s,\"on_safe_square\":%s}",
+        user_id, piece_id, from_sq, to_sq, total_steps,
         is_exit   ? "true" : "false",
         on_safe   ? "true" : "false");
     broadcast_game_action_to_room(live, room_id, moved_json, mlen);
