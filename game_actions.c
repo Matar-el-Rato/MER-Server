@@ -1135,7 +1135,7 @@ static void handle_use_cigarette(int fd, int user_id, int match_id, int room_id,
                                   const char *json, client_list_t *live,
                                   db_t *db, pthread_mutex_t *db_mutex)
 {
-    (void)fd; (void)json; (void)match_id; (void)db; (void)db_mutex;
+    (void)fd; (void)json;
 
     /* Must be this player's turn. */
     pthread_mutex_lock(&g_turn_mutex);
@@ -1189,6 +1189,36 @@ static void handle_use_cigarette(int fd, int user_id, int match_id, int room_id,
     rpos += snprintf(out + rpos, sizeof(out) - (size_t)rpos, "]}");
 
     broadcast_game_action_to_room(live, room_id, out, rpos);
+
+    /* No moveable pieces after the reroll → don't strand the player on the turn
+     * clock until it expires (which also costs a life).  Mirror handle_roll_dice:
+     * doubles grant another roll, otherwise the turn passes — which slides the
+     * cubilete over to the next player. */
+    if (n_moveable == 0) {
+        if (die1 == die2) {
+            pthread_mutex_lock(&g_game_mutex);
+            int consec = gs->consecutive_doubles[slot];
+            pthread_mutex_unlock(&g_game_mutex);
+
+            char extra_json[128];
+            int  elen = snprintf(extra_json, sizeof(extra_json),
+                "{\"action\":\"" ACTION_EXTRA_TURN "\","
+                "\"user_id\":%d,\"reason\":\"doubles\",\"pending_movements\":0}",
+                user_id);
+            broadcast_game_action_to_room(live, room_id, extra_json, elen);
+
+            char ts_json[128];
+            int  tslen = snprintf(ts_json, sizeof(ts_json),
+                "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d,"
+                "\"consecutive_doubles\":%d,\"pending_movements\":0}",
+                user_id, consec);
+            broadcast_game_action_to_room(live, room_id, ts_json, tslen);
+
+            turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
+        } else {
+            advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+        }
+    }
 }
 
 static void handle_use_magnifying_glass(int fd, int user_id, int match_id, int room_id,
