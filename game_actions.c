@@ -1134,7 +1134,62 @@ static void handle_use_gun(int fd, int user_id, int match_id, int room_id,
 static void handle_use_cigarette(int fd, int user_id, int match_id, int room_id,
                                   const char *json, client_list_t *live,
                                   db_t *db, pthread_mutex_t *db_mutex)
-{ (void)fd;(void)user_id;(void)match_id;(void)room_id;(void)json;(void)live;(void)db;(void)db_mutex; }
+{
+    (void)fd; (void)json; (void)match_id; (void)db; (void)db_mutex;
+
+    /* Must be this player's turn. */
+    pthread_mutex_lock(&g_turn_mutex);
+    turn_state_t *ts = &g_turn_state[room_id];
+    if (ts->player_count == 0 || ts->turn_order[ts->current_idx] != user_id) {
+        pthread_mutex_unlock(&g_turn_mutex);
+        return;
+    }
+    pthread_mutex_unlock(&g_turn_mutex);
+
+    int slot = user_id_to_slot(room_id, user_id);
+    if (slot < 0) return;
+
+    pthread_mutex_lock(&g_game_mutex);
+    game_state_t *gs = &g_game_state[room_id];
+
+    /* Must own the cigarette and dice must be pending (roll already happened). */
+    if (!gs->has_item[slot][ITEM_CIGARETTE] ||
+        (gs->pending_die1 == 0 && gs->pending_die2 == 0)) {
+        pthread_mutex_unlock(&g_game_mutex);
+        return;
+    }
+
+    /* Generate new dice, replace the pending values. */
+    int die1 = (rand() % 6) + 1;
+    int die2 = (rand() % 6) + 1;
+    gs->pending_die1 = die1;
+    gs->pending_die2 = die2;
+
+    /* Consume the item. */
+    gs->has_item[slot][ITEM_CIGARETTE] = false;
+
+    /* Compute moveable pieces with the new dice. */
+    int  moveable[4];
+    bool can_exit  = false;
+    int  n_moveable = parchis_moveable_pieces(slot, die1, die2,
+                                               gs->piece_positions,
+                                               moveable, &can_exit);
+    pthread_mutex_unlock(&g_game_mutex);
+
+    /* Broadcast cigarette_result to all room clients. */
+    char out[256];
+    int  rpos = snprintf(out, sizeof(out),
+        "{\"action\":\"" ACTION_CIGARETTE_RESULT "\","
+        "\"user_id\":%d,\"die1\":%d,\"die2\":%d,\"total\":%d,"
+        "\"moveable_pieces\":[",
+        user_id, die1, die2, die1 + die2);
+    for (int i = 0; i < n_moveable; i++)
+        rpos += snprintf(out + rpos, sizeof(out) - (size_t)rpos,
+                         "%s%d", i ? "," : "", moveable[i]);
+    rpos += snprintf(out + rpos, sizeof(out) - (size_t)rpos, "]}");
+
+    broadcast_game_action_to_room(live, room_id, out, rpos);
+}
 
 static void handle_use_magnifying_glass(int fd, int user_id, int match_id, int room_id,
                                          const char *json, client_list_t *live,
@@ -1144,7 +1199,38 @@ static void handle_use_magnifying_glass(int fd, int user_id, int match_id, int r
 static void handle_use_handcuffs(int fd, int user_id, int match_id, int room_id,
                                   const char *json, client_list_t *live,
                                   db_t *db, pthread_mutex_t *db_mutex)
-{ (void)fd;(void)user_id;(void)match_id;(void)room_id;(void)json;(void)live;(void)db;(void)db_mutex; }
+{
+    (void)fd; (void)match_id; (void)db; (void)db_mutex;
+
+    int target_user_id = json_int_val(json, "target_user_id", -1);
+    if (target_user_id < 0) return;
+
+    int slot        = user_id_to_slot(room_id, user_id);
+    int target_slot = user_id_to_slot(room_id, target_user_id);
+    if (slot < 0 || target_slot < 0 || slot == target_slot) return;
+
+    pthread_mutex_lock(&g_game_mutex);
+    game_state_t *gs = &g_game_state[room_id];
+
+    /* Validate: attacker must own the item; target must not already be cuffed. */
+    if (!gs->has_item[slot][ITEM_HANDCUFFS] || gs->is_handcuffed[target_slot]) {
+        pthread_mutex_unlock(&g_game_mutex);
+        return;
+    }
+
+    /* Consume item and mark target as handcuffed. */
+    gs->has_item[slot][ITEM_HANDCUFFS] = false;
+    gs->is_handcuffed[target_slot]     = true;
+    pthread_mutex_unlock(&g_game_mutex);
+
+    /* Broadcast to all room clients. */
+    char out[128];
+    int  len = snprintf(out, sizeof(out),
+        "{\"action\":\"" ACTION_HANDCUFFS_APPLIED "\","
+        "\"attacker_user_id\":%d,\"target_user_id\":%d}",
+        user_id, target_user_id);
+    broadcast_game_action_to_room(live, room_id, out, len);
+}
 
 static void handle_use_fire_axe(int fd, int user_id, int match_id, int room_id,
                                  const char *json, client_list_t *live,
