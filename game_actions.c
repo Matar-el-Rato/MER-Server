@@ -373,6 +373,7 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
         pos += snprintf(json + pos, sizeof(json) - (size_t)pos, ",%d", turn_order[i]);
 
     pos += snprintf(json + pos, sizeof(json) - (size_t)pos, "],\"item_grants\":[");
+    pthread_mutex_lock(&g_game_mutex);
     for (int i = 0; i < player_count; i++) {
         int item1 = rand() % NUM_ITEMS;
         int item2 = (item1 + 1 + rand() % (NUM_ITEMS - 1)) % NUM_ITEMS;
@@ -383,7 +384,16 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
             pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
                             ",\"%s\"", ITEM_NAMES[item2]);
         pos += snprintf(json + pos, sizeof(json) - (size_t)pos, "]}");
+
+        /* Record granted items so golden_square_event won't re-grant them. */
+        int islot = user_id_to_slot(room_id, player_ids[i]);
+        if (islot >= 0) {
+            g_game_state[room_id].has_item[islot][item1] = true;
+            if (i == winner_idx)
+                g_game_state[room_id].has_item[islot][item2] = true;
+        }
     }
+    pthread_mutex_unlock(&g_game_mutex);
 
     /* Include golden squares so clients can mark them on the board. */
     pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
@@ -941,20 +951,33 @@ static void handle_move_piece(int fd, int user_id,
         static const char *ITEM_NAMES[] = {
             "gun", "cigarette", "magnifying_glass", "handcuffs", "fire_axe"
         };
-        /* 6-sided roulette: faces 0-4 = items, face 5 = reroll. Cap at 20 spins. */
+        /* Snapshot which items this player already owns. */
+        bool owned[NUM_ITEMS];
+        pthread_mutex_lock(&g_game_mutex);
+        for (int k = 0; k < NUM_ITEMS; k++)
+            owned[k] = g_game_state[room_id].has_item[slot][k];
+        pthread_mutex_unlock(&g_game_mutex);
+
+        /* 6-sided spin: faces 0-4 = items, face 5 = reroll.
+           Also reroll if the item is already owned. Cap at 20 spins. */
         int spins[20];
         int spin_count = 0;
         int face;
         do {
             face = rand() % 6;
             spins[spin_count++] = face;
-        } while (face == 5 && spin_count < 20);
-        if (face == 5) face = rand() % 5; /* safety cap: force an item */
+        } while ((face == 5 || (face < NUM_ITEMS && owned[face])) && spin_count < 20);
 
-        /* Grant item if player doesn't already hold it. */
+        /* Safety cap: all owned or only got rerolls — find first unowned item. */
+        if (face == 5 || (face < NUM_ITEMS && owned[face])) {
+            face = 0;
+            for (int k = 0; k < NUM_ITEMS; k++)
+                if (!owned[k]) { face = k; break; }
+        }
+
+        /* Record the grant. */
         pthread_mutex_lock(&g_game_mutex);
-        if (!g_game_state[room_id].has_item[slot][face])
-            g_game_state[room_id].has_item[slot][face] = true;
+        g_game_state[room_id].has_item[slot][face] = true;
         pthread_mutex_unlock(&g_game_mutex);
 
         /* Build spins JSON array. "magnifying_glass"×20 + wrapper ≈ 520 bytes max. */
