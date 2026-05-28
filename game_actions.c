@@ -1338,9 +1338,10 @@ static void handle_use_gun(int fd, int user_id, int match_id, int room_id,
 
             int rlen = snprintf(result_json, sizeof(result_json),
                 "{\"action\":\"" ACTION_GUN_RESULT "\","
-                "\"attacker_user_id\":%d,\"target_user_id\":%d,"
+                "\"attacker_user_id\":%d,\"attacker_piece_id\":%d,"
+                "\"target_user_id\":%d,"
                 "\"target_piece_id\":%d,\"square\":%d,\"result\":\"kill\"}",
-                user_id, victim_user_id, victim_piece, at_sq);
+                user_id, piece_id, victim_user_id, victim_piece, at_sq);
             broadcast_game_action_to_room(live, room_id, result_json, rlen);
 
             pthread_mutex_lock(&g_game_mutex);
@@ -1366,27 +1367,19 @@ static void handle_use_gun(int fd, int user_id, int match_id, int room_id,
             gs->piece_positions[slot][piece_id] = retreat_sq;
             pthread_mutex_unlock(&g_game_mutex);
 
-            /* Broadcast gun_result first so clients know why the piece is moving. */
+            /* gun_result carries retreat_to so clients animate the step-back directly.
+             * No separate piece_moved — that caused a full 67-step ring traversal. */
             int rlen = snprintf(result_json, sizeof(result_json),
                 "{\"action\":\"" ACTION_GUN_RESULT "\","
-                "\"attacker_user_id\":%d,\"target_user_id\":%d,"
+                "\"attacker_user_id\":%d,\"attacker_piece_id\":%d,"
+                "\"target_user_id\":%d,"
                 "\"target_piece_id\":%d,\"square\":%d,\"result\":\"misfire\","
                 "\"retreat_to\":%d}",
-                user_id, victim_user_id, victim_piece, at_sq, retreat_sq);
+                user_id, piece_id, victim_user_id, victim_piece, at_sq, retreat_sq);
             broadcast_game_action_to_room(live, room_id, result_json, rlen);
             pthread_mutex_lock(db_mutex);
             db_log_event(db, match_id, user_id, ACTION_GUN_RESULT, result_json);
             pthread_mutex_unlock(db_mutex);
-
-            /* Broadcast the retreat move so all clients animate the piece back. */
-            char retreat_json[256];
-            int  mlen = snprintf(retreat_json, sizeof(retreat_json),
-                "{\"action\":\"" ACTION_PIECE_MOVED "\","
-                "\"user_id\":%d,\"piece_id\":%d,\"from\":%d,\"to\":%d,"
-                "\"steps\":1,\"is_exit\":false,\"on_safe_square\":%s}",
-                user_id, piece_id, at_sq, retreat_sq,
-                parchis_is_safe(retreat_sq, slot) ? "true" : "false");
-            broadcast_game_action_to_room(live, room_id, retreat_json, mlen);
         }
     } else {
         /* ── Skip: normal capture + bonus moves, gun is NOT consumed ──────── */
