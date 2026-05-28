@@ -448,8 +448,16 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
     pos += snprintf(json + pos, sizeof(json) - (size_t)pos, "],\"item_grants\":[");
     pthread_mutex_lock(&g_game_mutex);
     for (int i = 0; i < player_count; i++) {
-        int item1 = rand() % NUM_ITEMS;
-        int item2 = (item1 + 1 + rand() % (NUM_ITEMS - 1)) % NUM_ITEMS;
+        int item1, item2;
+        if (g_golden_force_count > 0) {
+            item1 = g_golden_force[g_golden_force_idx % g_golden_force_count];
+            g_golden_force_idx++;
+            item2 = g_golden_force[g_golden_force_idx % g_golden_force_count];
+            g_golden_force_idx++;
+        } else {
+            item1 = rand() % NUM_ITEMS;
+            item2 = (item1 + 1 + rand() % (NUM_ITEMS - 1)) % NUM_ITEMS;
+        }
         pos += snprintf(json + pos, sizeof(json) - (size_t)pos,
                         "%s{\"user_id\":%d,\"items\":[\"%s\"",
                         i ? "," : "", player_ids[i], ITEM_NAMES[item1]);
