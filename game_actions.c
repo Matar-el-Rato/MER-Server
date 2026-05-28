@@ -1102,8 +1102,20 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
         int face;
 
         if (g_golden_force_count > 0) {
-            face = g_golden_force[g_golden_force_idx % g_golden_force_count];
-            g_golden_force_idx++;
+            /* Cycle the forced list but skip items the player already owns. */
+            int tries = 0;
+            do {
+                face = g_golden_force[g_golden_force_idx % g_golden_force_count];
+                g_golden_force_idx++;
+                tries++;
+            } while (face < NUM_ITEMS && owned[face] && tries < g_golden_force_count);
+
+            /* All forced items owned — fall back to first unowned item. */
+            if (face < NUM_ITEMS && owned[face]) {
+                face = 0;
+                for (int k = 0; k < NUM_ITEMS; k++)
+                    if (!owned[k]) { face = k; break; }
+            }
             spins[spin_count++] = face;
         } else {
             do {
@@ -1346,16 +1358,35 @@ static void handle_use_gun(int fd, int user_id, int match_id, int room_id,
             pthread_mutex_unlock(db_mutex);
 
         } else {
-            /* ── Misfire: no capture, turn continues ─────────────────────── */
+            /* ── Misfire: no capture.  The two pieces cannot legally share the
+             *    square, so bounce the attacker back one step on the ring.   ── */
+            int retreat_sq = (at_sq <= 1) ? 68 : at_sq - 1;
+
+            pthread_mutex_lock(&g_game_mutex);
+            gs->piece_positions[slot][piece_id] = retreat_sq;
+            pthread_mutex_unlock(&g_game_mutex);
+
+            /* Broadcast gun_result first so clients know why the piece is moving. */
             int rlen = snprintf(result_json, sizeof(result_json),
                 "{\"action\":\"" ACTION_GUN_RESULT "\","
                 "\"attacker_user_id\":%d,\"target_user_id\":%d,"
-                "\"target_piece_id\":%d,\"square\":%d,\"result\":\"misfire\"}",
-                user_id, victim_user_id, victim_piece, at_sq);
+                "\"target_piece_id\":%d,\"square\":%d,\"result\":\"misfire\","
+                "\"retreat_to\":%d}",
+                user_id, victim_user_id, victim_piece, at_sq, retreat_sq);
             broadcast_game_action_to_room(live, room_id, result_json, rlen);
             pthread_mutex_lock(db_mutex);
             db_log_event(db, match_id, user_id, ACTION_GUN_RESULT, result_json);
             pthread_mutex_unlock(db_mutex);
+
+            /* Broadcast the retreat move so all clients animate the piece back. */
+            char retreat_json[256];
+            int  mlen = snprintf(retreat_json, sizeof(retreat_json),
+                "{\"action\":\"" ACTION_PIECE_MOVED "\","
+                "\"user_id\":%d,\"piece_id\":%d,\"from\":%d,\"to\":%d,"
+                "\"steps\":1,\"is_exit\":false,\"on_safe_square\":%s}",
+                user_id, piece_id, at_sq, retreat_sq,
+                parchis_is_safe(retreat_sq, slot) ? "true" : "false");
+            broadcast_game_action_to_room(live, room_id, retreat_json, mlen);
         }
     } else {
         /* ── Skip: normal capture + bonus moves, gun is NOT consumed ──────── */
