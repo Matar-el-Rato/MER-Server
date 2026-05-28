@@ -1006,25 +1006,12 @@ static void handle_move_piece(int fd, int user_id,
     int pending_mvs = g_game_state[room_id].pending_movements[slot];
     pthread_mutex_unlock(&g_game_mutex);
 
-    if (pending_mvs > 0) {
-        /* Extra move from capture/goal bonus.
-         * If this was a doubles move, remember the reroll — it fires after the bonus is used. */
-        if (is_doubles) {
-            pthread_mutex_lock(&g_game_mutex);
-            g_game_state[room_id].pending_doubles_reroll[slot] = true;
-            pthread_mutex_unlock(&g_game_mutex);
-        }
-        const char *reason = (captured_count > 0 && !scored_goal) ? "capture_bonus"
-                           : (scored_goal && captured_count == 0)  ? "goal_bonus"
-                           : "capture_bonus";
-        char extra_json[128];
-        int  elen = snprintf(extra_json, sizeof(extra_json),
-            "{\"action\":\"" ACTION_EXTRA_TURN "\","
-            "\"user_id\":%d,\"reason\":\"%s\",\"pending_movements\":%d}",
-            user_id, reason, pending_mvs);
-        broadcast_game_action_to_room(live, room_id, extra_json, elen);
-    } else if (second_move_die > 0) {
-        /* Second move after exit (5+5 or 5+X): offer remaining die to the mover. */
+    if (second_move_die > 0) {
+        /* Second move after exit (5+5 or 5+X): offer remaining die to the mover.
+         * IMPORTANT: this branch runs BEFORE the capture-bonus branch even when a capture
+         * just happened, because handle_move_piece consumes pending_die1 (the second die)
+         * before pending_movements (the capture bonus).  Announcing them in execution
+         * order avoids the client showing "20" while the server actually executes "X". */
         pthread_mutex_lock(&g_game_mutex);
         int  moveable2[4];
         bool can_exit2;
@@ -1034,13 +1021,31 @@ static void handle_move_piece(int fd, int user_id,
         pthread_mutex_unlock(&g_game_mutex);
 
         if (n2 == 0) {
-            /* Nothing to move — clear pending die, check for owed reroll. */
+            /* Nothing to move with the second die — clear it and fall through to whatever
+             * else is queued: a capture/goal bonus, a 5+5 reroll, or simply advance. */
             pthread_mutex_lock(&g_game_mutex);
             g_game_state[room_id].pending_die1 = 0;
             bool five_reroll = g_game_state[room_id].pending_five_reroll[slot];
             if (five_reroll) g_game_state[room_id].pending_five_reroll[slot] = false;
             pthread_mutex_unlock(&g_game_mutex);
-            if (five_reroll) {
+
+            if (pending_mvs > 0) {
+                /* Capture/goal bonus is still owed — don't drop it on the floor. */
+                if (is_doubles) {
+                    pthread_mutex_lock(&g_game_mutex);
+                    g_game_state[room_id].pending_doubles_reroll[slot] = true;
+                    pthread_mutex_unlock(&g_game_mutex);
+                }
+                const char *reason = (captured_count > 0 && !scored_goal) ? "capture_bonus"
+                                   : (scored_goal && captured_count == 0)  ? "goal_bonus"
+                                   : "capture_bonus";
+                char extra_json[128];
+                int  elen = snprintf(extra_json, sizeof(extra_json),
+                    "{\"action\":\"" ACTION_EXTRA_TURN "\","
+                    "\"user_id\":%d,\"reason\":\"%s\",\"pending_movements\":%d}",
+                    user_id, reason, pending_mvs);
+                broadcast_game_action_to_room(live, room_id, extra_json, elen);
+            } else if (five_reroll) {
                 char extra_json[128];
                 int  elen = snprintf(extra_json, sizeof(extra_json),
                     "{\"action\":\"" ACTION_EXTRA_TURN "\","
@@ -1058,6 +1063,8 @@ static void handle_move_piece(int fd, int user_id,
                 advance_turn(room_id, user_id, live, db, db_mutex, match_id);
             }
         } else {
+            /* Send dice_result for the second move.  Any pending capture/goal bonus or
+             * 5+5 reroll is announced naturally by the NEXT move_piece's turn-flow check. */
             char dice2_json[256];
             int  d2len = 0;
             d2len += snprintf(dice2_json + d2len, sizeof(dice2_json) - (size_t)d2len,
@@ -1073,6 +1080,23 @@ static void handle_move_piece(int fd, int user_id,
             d2len += snprintf(dice2_json + d2len, sizeof(dice2_json) - (size_t)d2len, "]}");
             send_game_action_to_fd(fd, dice2_json, d2len);
         }
+    } else if (pending_mvs > 0) {
+        /* Extra move from capture/goal bonus.
+         * If this was a doubles move, remember the reroll — it fires after the bonus is used. */
+        if (is_doubles) {
+            pthread_mutex_lock(&g_game_mutex);
+            g_game_state[room_id].pending_doubles_reroll[slot] = true;
+            pthread_mutex_unlock(&g_game_mutex);
+        }
+        const char *reason = (captured_count > 0 && !scored_goal) ? "capture_bonus"
+                           : (scored_goal && captured_count == 0)  ? "goal_bonus"
+                           : "capture_bonus";
+        char extra_json[128];
+        int  elen = snprintf(extra_json, sizeof(extra_json),
+            "{\"action\":\"" ACTION_EXTRA_TURN "\","
+            "\"user_id\":%d,\"reason\":\"%s\",\"pending_movements\":%d}",
+            user_id, reason, pending_mvs);
+        broadcast_game_action_to_room(live, room_id, extra_json, elen);
     } else if (is_doubles) {
         /* Regular doubles (never 5+5): player rolls again. */
         char extra_json[128];
