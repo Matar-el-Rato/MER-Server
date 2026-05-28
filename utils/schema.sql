@@ -61,12 +61,14 @@ CREATE TABLE IF NOT EXISTS `match_participants` (
 CREATE TABLE IF NOT EXISTS `match_events` (
     `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
     `match_id` INT NOT NULL,
-    `user_id` INT NOT NULL,
+    -- NULL for match-wide events with no specific author (initiative_sequence,
+    -- chairs_locked, ...). db_log_event in db.c inserts NULL when user_id <= 0.
+    `user_id` INT NULL,
     `event_type` VARCHAR(30) NOT NULL,
     `event_data` JSON NOT NULL,
     `timestamp` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (`match_id`) REFERENCES `matches`(`id`) ON DELETE CASCADE,
-    FOREIGN KEY (`user_id`) REFERENCES `users`(`id`)
+    FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- 6. Chat Messages

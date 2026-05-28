@@ -880,14 +880,41 @@ void handle_client(int sock_conn, db_t *db) {
         write(sock_conn, &res, sizeof(res));
     } else if (req_type == REQ_CHANGE_SKIN) {
         change_skin_req_t req;
-        read(sock_conn, (char*)&req + sizeof(uint8_t), sizeof(change_skin_req_t) - sizeof(uint8_t));
+        memset(&req, 0, sizeof(req)); /* don't leak stack garbage if the read is short */
+
+        /* Loop the read — a single read() can return fewer bytes than requested, leaving
+         * the rest of the struct as garbage (which previously surfaced in logs as a
+         * "User ID 707723264 -> Skin ID 224" style nonsense update against the DB). */
+        char  *dst       = (char*)&req + sizeof(uint8_t);
+        size_t remaining = sizeof(change_skin_req_t) - sizeof(uint8_t);
+        bool   read_ok   = true;
+        while (remaining > 0) {
+            ssize_t n = read(sock_conn, dst, remaining);
+            if (n <= 0) { read_ok = false; break; }
+            dst       += n;
+            remaining -= (size_t)n;
+        }
+
+        generic_res_t res;
+        memset(&res, 0, sizeof(res));
+
+        if (!read_ok || req.user_id <= 0 || req.skin_id <= 0) {
+            char err_log[160];
+            snprintf(err_log, sizeof(err_log),
+                "[skin] rejected malformed REQ_CHANGE_SKIN (user_id=%d skin_id=%d read_ok=%d)\n",
+                req.user_id, req.skin_id, read_ok ? 1 : 0);
+            tlog(err_log);
+            res.code = RES_ERR_UNKNOWN;
+            strcpy(res.message, "Malformed change-skin request");
+            write(sock_conn, &res, sizeof(res));
+            close(sock_conn);
+            return;
+        }
 
         char log_msg[256];
         sprintf(log_msg, "Change skin request: User ID %d -> Skin ID %d\n", req.user_id, req.skin_id);
         tlog(log_msg);
 
-        generic_res_t res;
-        memset(&res, 0, sizeof(res));
         if (db_update_skin(db, req.user_id, req.skin_id) == 0) {
             unsigned long long affected = mysql_affected_rows(db->conn);
             char ok_log[128];
