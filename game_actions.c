@@ -1286,10 +1286,125 @@ static void handle_use_handcuffs(int fd, int user_id, int match_id, int room_id,
     broadcast_game_action_to_room(live, room_id, out, len);
 }
 
+/* Returns the ring square immediately before `sq` (with 68→1 wrap). 0 if out of range. */
+static int ring_prev(int sq)
+{
+    if (sq < 1 || sq > 68) return 0;
+    return sq == 1 ? 68 : sq - 1;
+}
+
+/* Returns the ring square immediately after `sq` (with 68→1 wrap). 0 if out of range. */
+static int ring_next(int sq)
+{
+    if (sq < 1 || sq > 68) return 0;
+    return sq == 68 ? 1 : sq + 1;
+}
+
+/* True if no piece (any color) sits on `sq`. */
+static bool square_is_empty(int room_id, int sq)
+{
+    game_state_t *gs = &g_game_state[room_id];
+    for (int s = 0; s < MAX_ROOM_PLAYERS; s++)
+        for (int p = 0; p < 4; p++)
+            if (gs->piece_positions[s][p] == sq) return false;
+    return true;
+}
+
 static void handle_use_fire_axe(int fd, int user_id, int match_id, int room_id,
                                  const char *json, client_list_t *live,
                                  db_t *db, pthread_mutex_t *db_mutex)
-{ (void)fd;(void)user_id;(void)match_id;(void)room_id;(void)json;(void)live;(void)db;(void)db_mutex; }
+{
+    (void)fd; (void)match_id; (void)db; (void)db_mutex;
+
+    int target_sq = json_int_val(json, "target_square", -1);
+    if (target_sq < 1 || target_sq > 68) return;  /* ring squares only */
+
+    int slot = user_id_to_slot(room_id, user_id);
+    if (slot < 0) return;
+
+    pthread_mutex_lock(&g_game_mutex);
+    game_state_t *gs = &g_game_state[room_id];
+
+    /* Must own the axe. */
+    if (!gs->has_item[slot][ITEM_FIRE_AXE]) {
+        pthread_mutex_unlock(&g_game_mutex);
+        return;
+    }
+
+    /* Collect exactly the two pieces sitting on target_sq. Same-color barriers and
+     * mixed-color barriers on safe squares both qualify. */
+    int hit_slot[2];
+    int hit_piece[2];
+    int hit_count = 0;
+    for (int s = 0; s < MAX_ROOM_PLAYERS && hit_count <= 2; s++) {
+        for (int p = 0; p < 4 && hit_count <= 2; p++) {
+            if (gs->piece_positions[s][p] == target_sq) {
+                if (hit_count < 2) {
+                    hit_slot[hit_count]  = s;
+                    hit_piece[hit_count] = p;
+                }
+                hit_count++;
+            }
+        }
+    }
+    if (hit_count != 2) {
+        pthread_mutex_unlock(&g_game_mutex);
+        return;  /* must be exactly 2 pieces to form a clean barrier */
+    }
+
+    /* Per design: prev/next squares must be empty to avoid edge-case interactions. */
+    int prev_sq = ring_prev(target_sq);
+    int next_sq = ring_next(target_sq);
+    if (prev_sq == 0 || next_sq == 0) {
+        pthread_mutex_unlock(&g_game_mutex);
+        return;
+    }
+    if (!square_is_empty(room_id, prev_sq) || !square_is_empty(room_id, next_sq)) {
+        pthread_mutex_unlock(&g_game_mutex);
+        return;
+    }
+
+    /* Randomly choose which of the two goes forward, the other goes backward. */
+    int fwd_idx = rand() & 1;
+    int bwd_idx = 1 - fwd_idx;
+
+    int fwd_slot  = hit_slot[fwd_idx];
+    int fwd_piece = hit_piece[fwd_idx];
+    int bwd_slot  = hit_slot[bwd_idx];
+    int bwd_piece = hit_piece[bwd_idx];
+
+    gs->piece_positions[fwd_slot][fwd_piece] = next_sq;
+    gs->piece_positions[bwd_slot][bwd_piece] = prev_sq;
+
+    /* Consume the axe. */
+    gs->has_item[slot][ITEM_FIRE_AXE] = false;
+
+    pthread_mutex_unlock(&g_game_mutex);
+
+    int fwd_user = g_chair_state[room_id].slots[fwd_slot].user_id;
+    int bwd_user = g_chair_state[room_id].slots[bwd_slot].user_id;
+
+    /* Broadcast the axe event with both displaced pieces. */
+    char out[384];
+    int  len = snprintf(out, sizeof(out),
+        "{\"action\":\"" ACTION_FIRE_AXE_USED "\","
+        "\"attacker_user_id\":%d,\"target_square\":%d,"
+        "\"forward\":{\"user_id\":%d,\"piece_id\":%d,\"to_square\":%d},"
+        "\"backward\":{\"user_id\":%d,\"piece_id\":%d,\"to_square\":%d}}",
+        user_id, target_sq,
+        fwd_user, fwd_piece, next_sq,
+        bwd_user, bwd_piece, prev_sq);
+    broadcast_game_action_to_room(live, room_id, out, len);
+
+    /* Also broadcast a barrier_broken so existing client logic re-centers any
+     * stragglers — though by construction nothing remains on target_sq. */
+    char bar_json[128];
+    int  blen = snprintf(bar_json, sizeof(bar_json),
+        "{\"action\":\"" ACTION_BARRIER_BROKEN "\","
+        "\"user_id\":%d,\"square\":%d,\"reason\":\"fire_axe\"}",
+        user_id, target_sq);
+    broadcast_game_action_to_room(live, room_id, bar_json, blen);
+}
 
 /* ── Dispatch ──────────────────────────────────────────────────────────────── */
 

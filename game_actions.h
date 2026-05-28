@@ -40,6 +40,7 @@
 #define ACTION_CIGARETTE_RESULT     "cigarette_result"
 #define ACTION_MAGNIFYING_USED      "magnifying_glass_used"
 #define ACTION_HANDCUFFS_APPLIED    "handcuffs_applied"
+#define ACTION_FIRE_AXE_USED        "fire_axe_used"
 #define ACTION_BARRIER_DESTROYED    "barrier_destroyed"
 #define ACTION_LIFE_LOST            "life_lost"
 #define ACTION_PLAYER_ELIMINATED    "player_eliminated"
