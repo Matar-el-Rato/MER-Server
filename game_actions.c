@@ -771,6 +771,12 @@ static void handle_roll_dice(int fd, int user_id,
 
 /* ── Move piece ────────────────────────────────────────────────────────────── */
 
+/* Defined below handle_use_gun; forward-declared so handle_move_piece can call it. */
+static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int slot,
+                             int piece_id, int to_sq, bool is_doubles, int second_move_die,
+                             int captured_count, bool scored_goal,
+                             client_list_t *live, db_t *db, pthread_mutex_t *db_mutex);
+
 static void handle_move_piece(int fd, int user_id,
                                int match_id, int room_id,
                                const char *json,
@@ -965,8 +971,47 @@ static void handle_move_piece(int fd, int user_id,
         broadcast_game_action_to_room(live, room_id, bar_json, blen);
     }
 
-    /* Captures — land on non-safe square, OR on own spawn square (priority eats enemies). */
     bool spawn_priority = (to_sq == PARCHIS_EXIT[slot]);
+
+    /* ── Gun prompt: if the attacker owns the gun and lands on an enemy,
+     *    suspend the capture and send a private choice prompt.              ── */
+    if ((!on_safe || spawn_priority) && !parchis_is_goal(to_sq)) {
+        pthread_mutex_lock(&g_game_mutex);
+        bool has_gun  = g_game_state[room_id].has_item[slot][ITEM_GUN];
+        int  victim_s = -1, victim_p = -1;
+        if (has_gun) {
+            for (int s = 0; s < MAX_ROOM_PLAYERS && victim_s < 0; s++) {
+                if (s == slot) continue;
+                for (int p = 0; p < 4; p++) {
+                    if (g_game_state[room_id].piece_positions[s][p] == to_sq) {
+                        victim_s = s; victim_p = p; break;
+                    }
+                }
+            }
+        }
+        if (victim_s >= 0) {
+            g_game_state[room_id].pending_gun_choice[slot]          = true;
+            g_game_state[room_id].pending_gun_piece_moved[slot]     = piece_id;
+            g_game_state[room_id].pending_gun_victim_slot[slot]     = victim_s;
+            g_game_state[room_id].pending_gun_victim_piece[slot]    = victim_p;
+            g_game_state[room_id].pending_gun_at_sq[slot]           = to_sq;
+            g_game_state[room_id].pending_gun_is_doubles[slot]      = is_doubles;
+            g_game_state[room_id].pending_gun_second_move_die[slot] = second_move_die;
+            int victim_uid = g_chair_state[room_id].slots[victim_s].user_id;
+            pthread_mutex_unlock(&g_game_mutex);
+
+            char prompt[192];
+            int  plen = snprintf(prompt, sizeof(prompt),
+                "{\"action\":\"" ACTION_GUN_AVAILABLE "\","
+                "\"target_user_id\":%d,\"target_piece_id\":%d,\"square\":%d}",
+                victim_uid, victim_p, to_sq);
+            send_game_action_to_fd(fd, prompt, plen);
+            return;  /* turn flow resumes in handle_use_gun */
+        }
+        pthread_mutex_unlock(&g_game_mutex);
+    }
+
+    /* Captures — land on non-safe square, OR on own spawn square (priority eats enemies). */
     int  captured_count = 0;
     if ((!on_safe || spawn_priority) && !parchis_is_goal(to_sq)) {
         for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
@@ -987,8 +1032,27 @@ static void handle_move_piece(int fd, int user_id,
         }
     }
 
-    /* Goal scored? */
     bool scored_goal = parchis_is_goal(to_sq);
+    finish_move_turn(fd, user_id, match_id, room_id, slot,
+                     piece_id, to_sq, is_doubles, second_move_die,
+                     captured_count, scored_goal,
+                     live, db, db_mutex);
+}
+
+/* ── Item handlers ─────────────────────────────────────────────────────────── */
+
+/* finish_move_turn: runs after all captures are resolved (goal, golden square,
+ * turn flow).  Called from handle_move_piece and handle_use_gun. */
+static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int slot,
+                             int piece_id, int to_sq, bool is_doubles, int second_move_die,
+                             int captured_count, bool scored_goal,
+                             client_list_t *live, db_t *db, pthread_mutex_t *db_mutex)
+{
+    static const char *ITEM_NAMES[] = {
+        "gun", "cigarette", "magnifying_glass", "handcuffs", "fire_axe"
+    };
+
+    /* Goal scored? */
     if (scored_goal) {
         pthread_mutex_lock(&g_game_mutex);
         int finished = count_finished(room_id, slot);
@@ -1005,14 +1069,12 @@ static void handle_move_piece(int fd, int user_id,
         db_log_event(db, match_id, user_id, ACTION_GOAL_SCORED, goal_json);
         pthread_mutex_unlock(db_mutex);
 
-        /* Win condition: all 4 pieces in goal. */
         if (finished >= 4) {
             char win_json[128];
             int  wlen = snprintf(win_json, sizeof(win_json),
                 "{\"action\":\"" ACTION_GAME_OVER "\","
                 "\"winner_user_id\":%d,\"reason\":\"race\"}", user_id);
             broadcast_game_action_to_room(live, room_id, win_json, wlen);
-
             pthread_mutex_lock(&g_game_mutex);
             g_game_state[room_id].active = false;
             pthread_mutex_unlock(&g_game_mutex);
@@ -1029,10 +1091,6 @@ static void handle_move_piece(int fd, int user_id,
     pthread_mutex_unlock(&g_game_mutex);
 
     if (is_golden && !parchis_is_goal(to_sq)) {
-        static const char *ITEM_NAMES[] = {
-            "gun", "cigarette", "magnifying_glass", "handcuffs", "fire_axe"
-        };
-        /* Snapshot which items this player already owns. */
         bool owned[NUM_ITEMS];
         pthread_mutex_lock(&g_game_mutex);
         for (int k = 0; k < NUM_ITEMS; k++)
@@ -1044,19 +1102,14 @@ static void handle_move_piece(int fd, int user_id,
         int face;
 
         if (g_golden_force_count > 0) {
-            /* config.txt override: use the next item in the forced list (cycles). */
             face = g_golden_force[g_golden_force_idx % g_golden_force_count];
             g_golden_force_idx++;
             spins[spin_count++] = face;
         } else {
-            /* Normal random spin: faces 0-4 = items, face 5 = reroll.
-               Also reroll if the item is already owned. Cap at 20 spins. */
             do {
                 face = rand() % 6;
                 spins[spin_count++] = face;
             } while ((face == 5 || (face < NUM_ITEMS && owned[face])) && spin_count < 20);
-
-            /* Safety cap: all owned or only got rerolls — find first unowned item. */
             if (face == 5 || (face < NUM_ITEMS && owned[face])) {
                 face = 0;
                 for (int k = 0; k < NUM_ITEMS; k++)
@@ -1064,12 +1117,10 @@ static void handle_move_piece(int fd, int user_id,
             }
         }
 
-        /* Record the grant. */
         pthread_mutex_lock(&g_game_mutex);
         g_game_state[room_id].has_item[slot][face] = true;
         pthread_mutex_unlock(&g_game_mutex);
 
-        /* Build spins JSON array. "magnifying_glass"×20 + wrapper ≈ 520 bytes max. */
         char gold_json[640];
         int  gpos = 0;
         gpos += snprintf(gold_json + gpos, sizeof(gold_json) - (size_t)gpos,
@@ -1083,7 +1134,6 @@ static void handle_move_piece(int fd, int user_id,
         }
         gpos += snprintf(gold_json + gpos, sizeof(gold_json) - (size_t)gpos,
             "],\"final_item\":\"%s\"}", ITEM_NAMES[face]);
-
         broadcast_game_action_to_room(live, room_id, gold_json, gpos);
         pthread_mutex_lock(db_mutex);
         db_log_event(db, match_id, user_id, ACTION_GOLDEN_SQUARE, gold_json);
@@ -1096,11 +1146,6 @@ static void handle_move_piece(int fd, int user_id,
     pthread_mutex_unlock(&g_game_mutex);
 
     if (second_move_die > 0) {
-        /* Second move after exit (5+5 or 5+X): offer remaining die to the mover.
-         * IMPORTANT: this branch runs BEFORE the capture-bonus branch even when a capture
-         * just happened, because handle_move_piece consumes pending_die1 (the second die)
-         * before pending_movements (the capture bonus).  Announcing them in execution
-         * order avoids the client showing "20" while the server actually executes "X". */
         pthread_mutex_lock(&g_game_mutex);
         int  moveable2[4];
         bool can_exit2;
@@ -1110,8 +1155,6 @@ static void handle_move_piece(int fd, int user_id,
         pthread_mutex_unlock(&g_game_mutex);
 
         if (n2 == 0) {
-            /* Nothing to move with the second die — clear it and fall through to whatever
-             * else is queued: a capture/goal bonus, a 5+5 reroll, or simply advance. */
             pthread_mutex_lock(&g_game_mutex);
             g_game_state[room_id].pending_die1 = 0;
             bool five_reroll = g_game_state[room_id].pending_five_reroll[slot];
@@ -1119,7 +1162,6 @@ static void handle_move_piece(int fd, int user_id,
             pthread_mutex_unlock(&g_game_mutex);
 
             if (pending_mvs > 0) {
-                /* Capture/goal bonus is still owed — don't drop it on the floor. */
                 if (is_doubles) {
                     pthread_mutex_lock(&g_game_mutex);
                     g_game_state[room_id].pending_doubles_reroll[slot] = true;
@@ -1152,8 +1194,6 @@ static void handle_move_piece(int fd, int user_id,
                 advance_turn(room_id, user_id, live, db, db_mutex, match_id);
             }
         } else {
-            /* Send dice_result for the second move.  Any pending capture/goal bonus or
-             * 5+5 reroll is announced naturally by the NEXT move_piece's turn-flow check. */
             char dice2_json[256];
             int  d2len = 0;
             d2len += snprintf(dice2_json + d2len, sizeof(dice2_json) - (size_t)d2len,
@@ -1170,8 +1210,6 @@ static void handle_move_piece(int fd, int user_id,
             send_game_action_to_fd(fd, dice2_json, d2len);
         }
     } else if (pending_mvs > 0) {
-        /* Extra move from capture/goal bonus.
-         * If this was a doubles move, remember the reroll — it fires after the bonus is used. */
         if (is_doubles) {
             pthread_mutex_lock(&g_game_mutex);
             g_game_state[room_id].pending_doubles_reroll[slot] = true;
@@ -1187,26 +1225,20 @@ static void handle_move_piece(int fd, int user_id,
             user_id, reason, pending_mvs);
         broadcast_game_action_to_room(live, room_id, extra_json, elen);
     } else if (is_doubles) {
-        /* Regular doubles (never 5+5): player rolls again. */
         char extra_json[128];
         int  elen = snprintf(extra_json, sizeof(extra_json),
             "{\"action\":\"" ACTION_EXTRA_TURN "\","
             "\"user_id\":%d,\"reason\":\"doubles\",\"pending_movements\":0}",
             user_id);
         broadcast_game_action_to_room(live, room_id, extra_json, elen);
-
-        /* Re-send turn_start so client re-enables roll. */
         char ts_json[128];
         int  tslen = snprintf(ts_json, sizeof(ts_json),
             "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d,"
             "\"consecutive_doubles\":%d,\"pending_movements\":0}",
             user_id, g_game_state[room_id].consecutive_doubles[slot]);
         broadcast_game_action_to_room(live, room_id, ts_json, tslen);
-
-        /* Fresh 60 s for the same player's bonus roll. */
         turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
     } else {
-        /* Check for deferred doubles reroll (past bonus) or 5+5-exit reroll. */
         pthread_mutex_lock(&g_game_mutex);
         bool deferred    = g_game_state[room_id].pending_doubles_reroll[slot];
         if (deferred)    g_game_state[room_id].pending_doubles_reroll[slot] = false;
@@ -1222,14 +1254,12 @@ static void handle_move_piece(int fd, int user_id,
                 "\"user_id\":%d,\"reason\":\"doubles\",\"pending_movements\":0}",
                 user_id);
             broadcast_game_action_to_room(live, room_id, extra_json, elen);
-
             char ts_json[128];
             int  tslen = snprintf(ts_json, sizeof(ts_json),
                 "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d,"
                 "\"consecutive_doubles\":%d,\"pending_movements\":0}",
                 user_id, deferred_consec);
             broadcast_game_action_to_room(live, room_id, ts_json, tslen);
-
             turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
         } else {
             advance_turn(room_id, user_id, live, db, db_mutex, match_id);
@@ -1237,12 +1267,112 @@ static void handle_move_piece(int fd, int user_id,
     }
 }
 
-/* ── Item stubs ────────────────────────────────────────────────────────────── */
-
 static void handle_use_gun(int fd, int user_id, int match_id, int room_id,
                             const char *json, client_list_t *live,
                             db_t *db, pthread_mutex_t *db_mutex)
-{ (void)fd;(void)user_id;(void)match_id;(void)room_id;(void)json;(void)live;(void)db;(void)db_mutex; }
+{
+    /* Must be this player's turn. */
+    pthread_mutex_lock(&g_turn_mutex);
+    turn_state_t *ts = &g_turn_state[room_id];
+    if (ts->player_count == 0 || ts->turn_order[ts->current_idx] != user_id) {
+        pthread_mutex_unlock(&g_turn_mutex);
+        return;
+    }
+    pthread_mutex_unlock(&g_turn_mutex);
+
+    int slot = user_id_to_slot(room_id, user_id);
+    if (slot < 0) return;
+
+    pthread_mutex_lock(&g_game_mutex);
+    game_state_t *gs = &g_game_state[room_id];
+
+    if (!gs->pending_gun_choice[slot]) {
+        pthread_mutex_unlock(&g_game_mutex);
+        return;
+    }
+
+    /* Read and clear pending state. */
+    int  piece_id        = gs->pending_gun_piece_moved[slot];
+    int  victim_slot     = gs->pending_gun_victim_slot[slot];
+    int  victim_piece    = gs->pending_gun_victim_piece[slot];
+    int  at_sq           = gs->pending_gun_at_sq[slot];
+    bool is_doubles      = gs->pending_gun_is_doubles[slot];
+    int  second_move_die = gs->pending_gun_second_move_die[slot];
+    gs->pending_gun_choice[slot] = false;
+
+    int victim_user_id = g_chair_state[room_id].slots[victim_slot].user_id;
+    pthread_mutex_unlock(&g_game_mutex);
+
+    /* Parse choice: "fire" = use the gun, anything else = skip (normal capture). */
+    const char *cv = json_str_val(json, "choice");
+    char choice[8] = "skip";
+    if (cv) json_str_copy(cv, choice, sizeof(choice));
+
+    int  captured_count = 0;
+    char result_json[256];
+
+    if (strcmp(choice, "fire") == 0) {
+        /* Consume the gun. */
+        pthread_mutex_lock(&g_game_mutex);
+        gs->has_item[slot][ITEM_GUN] = false;
+        pthread_mutex_unlock(&g_game_mutex);
+
+        if (rand() & 1) {
+            /* ── Kill: capture + victim loses a life ─────────────────────── */
+            do_capture(room_id, user_id, victim_slot, victim_piece, at_sq,
+                       live, db, db_mutex, match_id);
+            captured_count = 1;
+            /* Gun kill deliberately gives NO bonus moves — it's already powerful. */
+
+            int rlen = snprintf(result_json, sizeof(result_json),
+                "{\"action\":\"" ACTION_GUN_RESULT "\","
+                "\"attacker_user_id\":%d,\"target_user_id\":%d,"
+                "\"target_piece_id\":%d,\"square\":%d,\"result\":\"kill\"}",
+                user_id, victim_user_id, victim_piece, at_sq);
+            broadcast_game_action_to_room(live, room_id, result_json, rlen);
+
+            pthread_mutex_lock(&g_game_mutex);
+            gs->life_charges[victim_slot]--;
+            int lives = gs->life_charges[victim_slot];
+            pthread_mutex_unlock(&g_game_mutex);
+
+            rlen = snprintf(result_json, sizeof(result_json),
+                "{\"action\":\"" ACTION_LIFE_LOST "\","
+                "\"user_id\":%d,\"lives_remaining\":%d,\"reason\":\"gun\"}",
+                victim_user_id, lives);
+            broadcast_game_action_to_room(live, room_id, result_json, rlen);
+            pthread_mutex_lock(db_mutex);
+            db_log_event(db, match_id, user_id, ACTION_GUN_RESULT, result_json);
+            pthread_mutex_unlock(db_mutex);
+
+        } else {
+            /* ── Misfire: no capture, turn continues ─────────────────────── */
+            int rlen = snprintf(result_json, sizeof(result_json),
+                "{\"action\":\"" ACTION_GUN_RESULT "\","
+                "\"attacker_user_id\":%d,\"target_user_id\":%d,"
+                "\"target_piece_id\":%d,\"square\":%d,\"result\":\"misfire\"}",
+                user_id, victim_user_id, victim_piece, at_sq);
+            broadcast_game_action_to_room(live, room_id, result_json, rlen);
+            pthread_mutex_lock(db_mutex);
+            db_log_event(db, match_id, user_id, ACTION_GUN_RESULT, result_json);
+            pthread_mutex_unlock(db_mutex);
+        }
+    } else {
+        /* ── Skip: normal capture + bonus moves, gun is NOT consumed ──────── */
+        do_capture(room_id, user_id, victim_slot, victim_piece, at_sq,
+                   live, db, db_mutex, match_id);
+        captured_count = 1;
+        pthread_mutex_lock(&g_game_mutex);
+        gs->pending_movements[slot] += 20;
+        pthread_mutex_unlock(&g_game_mutex);
+    }
+
+    /* Continue normal turn flow. */
+    finish_move_turn(fd, user_id, match_id, room_id, slot,
+                     piece_id, at_sq, is_doubles, second_move_die,
+                     captured_count, false /* scored_goal */,
+                     live, db, db_mutex);
+}
 
 static void handle_use_cigarette(int fd, int user_id, int match_id, int room_id,
                                   const char *json, client_list_t *live,

@@ -118,6 +118,16 @@ typedef struct {
     bool peeked[MAX_ROOM_PLAYERS];
     int  peeked_die1[MAX_ROOM_PLAYERS];
     int  peeked_die2[MAX_ROOM_PLAYERS];
+
+    /* Pending gun choice: set when attacker lands on an enemy while holding the gun.
+     * Turn flow is suspended until the attacker sends use_gun {choice: fire|skip}. */
+    bool pending_gun_choice[MAX_ROOM_PLAYERS];
+    int  pending_gun_piece_moved[MAX_ROOM_PLAYERS];    /* attacker's piece_id         */
+    int  pending_gun_victim_slot[MAX_ROOM_PLAYERS];
+    int  pending_gun_victim_piece[MAX_ROOM_PLAYERS];
+    int  pending_gun_at_sq[MAX_ROOM_PLAYERS];          /* landing square              */
+    bool pending_gun_is_doubles[MAX_ROOM_PLAYERS];
+    int  pending_gun_second_move_die[MAX_ROOM_PLAYERS];
 } game_state_t;
 
 /* Per-room state arrays; index 0 unused, 1-NUM_ROOMS active. */
