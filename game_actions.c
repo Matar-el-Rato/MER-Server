@@ -1512,9 +1512,10 @@ static void handle_use_magnifying_glass(int fd, int user_id, int match_id, int r
     pthread_mutex_lock(&g_game_mutex);
     game_state_t *gs = &g_game_state[room_id];
 
-    /* Must own the glass and dice must not yet have been rolled this turn. */
-    if (!gs->has_item[slot][ITEM_MAGNIFYING_GLASS] ||
-        gs->pending_die1 != 0 || gs->pending_die2 != 0) {
+    /* Must own the glass. The pre-roll window is enforced client-side;
+     * pending_die1/die2 carry over from the previous turn so we cannot
+     * use them to detect a same-turn roll here. */
+    if (!gs->has_item[slot][ITEM_MAGNIFYING_GLASS]) {
         pthread_mutex_unlock(&g_game_mutex);
         return;
     }
