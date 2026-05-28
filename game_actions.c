@@ -661,6 +661,13 @@ static void handle_roll_dice(int fd, int user_id,
     pthread_mutex_lock(&g_game_mutex);
     game_state_t *gs = &g_game_state[room_id];
 
+    /* If the magnifying glass peeked this roll, use those values and clear them. */
+    if (gs->peeked[slot]) {
+        die1 = gs->peeked_die1[slot];
+        die2 = gs->peeked_die2[slot];
+        gs->peeked[slot] = false;
+    }
+
     /* Track consecutive doubles. */
     bool is_doubles = (die1 == die2);
     if (is_doubles) gs->consecutive_doubles[slot]++;
@@ -1487,7 +1494,53 @@ static void handle_use_cigarette(int fd, int user_id, int match_id, int room_id,
 static void handle_use_magnifying_glass(int fd, int user_id, int match_id, int room_id,
                                          const char *json, client_list_t *live,
                                          db_t *db, pthread_mutex_t *db_mutex)
-{ (void)fd;(void)user_id;(void)match_id;(void)room_id;(void)json;(void)live;(void)db;(void)db_mutex; }
+{
+    (void)json;
+
+    /* Must be this player's turn. */
+    pthread_mutex_lock(&g_turn_mutex);
+    turn_state_t *ts = &g_turn_state[room_id];
+    if (ts->player_count == 0 || ts->turn_order[ts->current_idx] != user_id) {
+        pthread_mutex_unlock(&g_turn_mutex);
+        return;
+    }
+    pthread_mutex_unlock(&g_turn_mutex);
+
+    int slot = user_id_to_slot(room_id, user_id);
+    if (slot < 0) return;
+
+    pthread_mutex_lock(&g_game_mutex);
+    game_state_t *gs = &g_game_state[room_id];
+
+    /* Must own the glass and dice must not yet have been rolled this turn. */
+    if (!gs->has_item[slot][ITEM_MAGNIFYING_GLASS] ||
+        gs->pending_die1 != 0 || gs->pending_die2 != 0) {
+        pthread_mutex_unlock(&g_game_mutex);
+        return;
+    }
+
+    /* Pre-roll the dice for this player's next roll. */
+    int die1 = (rand() % 6) + 1;
+    int die2 = (rand() % 6) + 1;
+
+    gs->peeked[slot]      = true;
+    gs->peeked_die1[slot] = die1;
+    gs->peeked_die2[slot] = die2;
+    gs->has_item[slot][ITEM_MAGNIFYING_GLASS] = false;
+
+    pthread_mutex_unlock(&g_game_mutex);
+
+    /* Send peeked values privately to the player only. */
+    char msg[128];
+    int  mlen = snprintf(msg, sizeof(msg),
+        "{\"action\":\"" ACTION_MAGNIFYING_RESULT "\",\"die1\":%d,\"die2\":%d}",
+        die1, die2);
+    send_game_action_to_fd(fd, msg, mlen);
+
+    pthread_mutex_lock(db_mutex);
+    db_log_event(db, match_id, user_id, ACTION_MAGNIFYING_RESULT, msg);
+    pthread_mutex_unlock(db_mutex);
+}
 
 static void handle_use_handcuffs(int fd, int user_id, int match_id, int room_id,
                                   const char *json, client_list_t *live,
