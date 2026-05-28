@@ -1,0 +1,5 @@
+# golden_force: comma-separated list of items the golden square will grant in order.
+# Cycles back to the start when exhausted. Comment out or delete to use random behaviour.
+# Valid names: gun  cigarette  magnifying_glass  handcuffs  fire_axe
+#
+#golden_force=gun,cigarette,magnifying_glass,handcuffs,fire_axe

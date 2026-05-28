@@ -132,6 +132,10 @@ extern pthread_mutex_t g_game_mutex;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
+/* Reads config.txt and applies testing overrides. Called automatically at each
+ * initiative_sequence; call manually if you need an earlier load. */
+void config_load(const char *path);
+
 void chair_state_init(int room_id, int match_id, int player_count);
 
 int chair_state_remove_user(int room_id, int user_id, char *color_out);

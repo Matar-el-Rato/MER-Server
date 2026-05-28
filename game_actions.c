@@ -11,6 +11,76 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
+/* ── Test config (config.txt) ────────────────────────────────────────────────
+ *
+ * Supported keys (one per line, comments start with #):
+ *
+ *   golden_force=gun,handcuffs,fire_axe,...
+ *       Forces the golden-square spin result in order, cycling when exhausted.
+ *       Valid item names: gun  cigarette  magnifying_glass  handcuffs  fire_axe
+ *
+ * Example config.txt:
+ *   golden_force=fire_axe,gun,handcuffs
+ *
+ * Config is (re)loaded at the start of every initiative_sequence so you can
+ * edit it between games without restarting the server.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+#define MAX_GOLDEN_FORCE 64
+
+static int g_golden_force[MAX_GOLDEN_FORCE];
+static int g_golden_force_count = 0;
+static int g_golden_force_idx   = 0;
+
+static int item_name_to_idx(const char *name)
+{
+    if (strcmp(name, "gun")              == 0) return ITEM_GUN;
+    if (strcmp(name, "cigarette")        == 0) return ITEM_CIGARETTE;
+    if (strcmp(name, "magnifying_glass") == 0) return ITEM_MAGNIFYING_GLASS;
+    if (strcmp(name, "handcuffs")        == 0) return ITEM_HANDCUFFS;
+    if (strcmp(name, "fire_axe")         == 0) return ITEM_FIRE_AXE;
+    return -1;
+}
+
+void config_load(const char *path)
+{
+    g_golden_force_count = 0;
+    g_golden_force_idx   = 0;
+
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+
+        const char *key = "golden_force=";
+        size_t klen = strlen(key);
+        if (strncmp(line, key, klen) != 0) continue;
+
+        char *p = line + klen;
+        char *tok = strtok(p, ", \t\r\n");
+        while (tok && g_golden_force_count < MAX_GOLDEN_FORCE) {
+            int idx = item_name_to_idx(tok);
+            if (idx >= 0)
+                g_golden_force[g_golden_force_count++] = idx;
+            else
+                fprintf(stderr, "[config] unknown item '%s' — skipped\n", tok);
+            tok = strtok(NULL, ", \t\r\n");
+        }
+        break;
+    }
+    fclose(f);
+
+    if (g_golden_force_count > 0) {
+        fprintf(stdout, "[config] golden_force loaded (%d items):", g_golden_force_count);
+        static const char *NAMES[] = { "gun","cigarette","magnifying_glass","handcuffs","fire_axe" };
+        for (int i = 0; i < g_golden_force_count; i++)
+            fprintf(stdout, " %s", NAMES[g_golden_force[i]]);
+        fprintf(stdout, "\n");
+    }
+}
+
 const char *SLOT_COLORS[MAX_ROOM_PLAYERS] = {"blue", "green", "yellow", "red"};
 
 chair_state_t   g_chair_state[NUM_ROOMS + 1];
@@ -310,6 +380,9 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
 
     static int seeded = 0;
     if (!seeded) { srand((unsigned int)time(NULL)); seeded = 1; }
+
+    /* Reload config every game so edits to config.txt take effect without restart. */
+    config_load("config.txt");
 
     int player_ids[MAX_ROOM_PLAYERS];
     int player_count = 0;
@@ -958,21 +1031,29 @@ static void handle_move_piece(int fd, int user_id,
             owned[k] = g_game_state[room_id].has_item[slot][k];
         pthread_mutex_unlock(&g_game_mutex);
 
-        /* 6-sided spin: faces 0-4 = items, face 5 = reroll.
-           Also reroll if the item is already owned. Cap at 20 spins. */
         int spins[20];
         int spin_count = 0;
         int face;
-        do {
-            face = rand() % 6;
-            spins[spin_count++] = face;
-        } while ((face == 5 || (face < NUM_ITEMS && owned[face])) && spin_count < 20);
 
-        /* Safety cap: all owned or only got rerolls — find first unowned item. */
-        if (face == 5 || (face < NUM_ITEMS && owned[face])) {
-            face = 0;
-            for (int k = 0; k < NUM_ITEMS; k++)
-                if (!owned[k]) { face = k; break; }
+        if (g_golden_force_count > 0) {
+            /* config.txt override: use the next item in the forced list (cycles). */
+            face = g_golden_force[g_golden_force_idx % g_golden_force_count];
+            g_golden_force_idx++;
+            spins[spin_count++] = face;
+        } else {
+            /* Normal random spin: faces 0-4 = items, face 5 = reroll.
+               Also reroll if the item is already owned. Cap at 20 spins. */
+            do {
+                face = rand() % 6;
+                spins[spin_count++] = face;
+            } while ((face == 5 || (face < NUM_ITEMS && owned[face])) && spin_count < 20);
+
+            /* Safety cap: all owned or only got rerolls — find first unowned item. */
+            if (face == 5 || (face < NUM_ITEMS && owned[face])) {
+                face = 0;
+                for (int k = 0; k < NUM_ITEMS; k++)
+                    if (!owned[k]) { face = k; break; }
+            }
         }
 
         /* Record the grant. */
