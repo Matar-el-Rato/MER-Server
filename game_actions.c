@@ -1334,7 +1334,9 @@ static void handle_use_gun(int fd, int user_id, int match_id, int room_id,
             do_capture(room_id, user_id, victim_slot, victim_piece, at_sq,
                        live, db, db_mutex, match_id);
             captured_count = 1;
-            /* Gun kill deliberately gives NO bonus moves — it's already powerful. */
+            pthread_mutex_lock(&g_game_mutex);
+            gs->pending_movements[slot] += 20;
+            pthread_mutex_unlock(&g_game_mutex);
 
             int rlen = snprintf(result_json, sizeof(result_json),
                 "{\"action\":\"" ACTION_GUN_RESULT "\","
@@ -1359,23 +1361,17 @@ static void handle_use_gun(int fd, int user_id, int match_id, int room_id,
             pthread_mutex_unlock(db_mutex);
 
         } else {
-            /* ── Misfire: no capture.  The two pieces cannot legally share the
-             *    square, so bounce the attacker back one step on the ring.   ── */
-            int retreat_sq = (at_sq <= 1) ? 68 : at_sq - 1;
-
+            /* ── Misfire: no capture. Attacker's piece is sent back to base. ── */
             pthread_mutex_lock(&g_game_mutex);
-            gs->piece_positions[slot][piece_id] = retreat_sq;
+            gs->piece_positions[slot][piece_id] = 0;  /* 0 = base */
             pthread_mutex_unlock(&g_game_mutex);
 
-            /* gun_result carries retreat_to so clients animate the step-back directly.
-             * No separate piece_moved — that caused a full 67-step ring traversal. */
             int rlen = snprintf(result_json, sizeof(result_json),
                 "{\"action\":\"" ACTION_GUN_RESULT "\","
                 "\"attacker_user_id\":%d,\"attacker_piece_id\":%d,"
                 "\"target_user_id\":%d,"
-                "\"target_piece_id\":%d,\"square\":%d,\"result\":\"misfire\","
-                "\"retreat_to\":%d}",
-                user_id, piece_id, victim_user_id, victim_piece, at_sq, retreat_sq);
+                "\"target_piece_id\":%d,\"square\":%d,\"result\":\"misfire\"}",
+                user_id, piece_id, victim_user_id, victim_piece, at_sq);
             broadcast_game_action_to_room(live, room_id, result_json, rlen);
             pthread_mutex_lock(db_mutex);
             db_log_event(db, match_id, user_id, ACTION_GUN_RESULT, result_json);
