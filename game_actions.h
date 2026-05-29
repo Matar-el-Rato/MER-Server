@@ -161,6 +161,13 @@ void handle_game_action(int fd, int user_id, const char *username,
 void broadcast_game_action_to_room(client_list_t *live, int room_id,
                                    const char *json, int json_len);
 
+/* Called when a player disconnects mid-match.
+ * Clears their pieces from board state, removes them from the turn rotation,
+ * and (if it was their turn) cancels the timer and starts the next player's turn. */
+void handle_player_disconnected(int room_id, int disc_user_id, const char *color,
+                                 client_list_t *live, db_t *db,
+                                 pthread_mutex_t *db_mutex, int match_id);
+
 /* Sends a MSG_GAME_ACTION to a single client (private message). */
 void send_game_action_to_fd(int fd, const char *json, int json_len);
 

@@ -365,6 +365,10 @@ static void remove_client(int fd) {
         pthread_mutex_lock(&g_db_mutex);
         db_log_event(db_ptr, leave_match_id, leave_user_id, "chair_vacated", vacated_json);
         pthread_mutex_unlock(&g_db_mutex);
+
+        /* Clean up in-game state: clear pieces, patch turn order, advance if needed. */
+        handle_player_disconnected(was_in_room, leave_user_id, vacated_color,
+                                   &g_live, db_ptr, &g_db_mutex, leave_match_id);
     }
 
     if (cancel_match) {

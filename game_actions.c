@@ -500,6 +500,90 @@ static void handle_initiative_sequence(client_list_t *live, int room_id, int mat
 
 /* ── Chair selection ───────────────────────────────────────────────────────── */
 
+/* Returns the slot index for a given color string, or -1. */
+static int slot_for_color(const char *color)
+{
+    for (int i = 0; i < MAX_ROOM_PLAYERS; i++)
+        if (strcmp(SLOT_COLORS[i], color) == 0) return i;
+    return -1;
+}
+
+void handle_player_disconnected(int room_id, int disc_user_id, const char *color,
+                                 client_list_t *live, db_t *db,
+                                 pthread_mutex_t *db_mutex, int match_id)
+{
+    /* Verify the match is still the one we think it is. */
+    pthread_mutex_lock(&g_game_mutex);
+    int active  = g_game_state[room_id].active;
+    int cur_mid = g_game_state[room_id].match_id;
+    pthread_mutex_unlock(&g_game_mutex);
+    if (!active || cur_mid != match_id) return;
+
+    /* 1. Clear the disconnected player's pieces from board state. */
+    int slot = slot_for_color(color);
+    if (slot >= 0) {
+        pthread_mutex_lock(&g_game_mutex);
+        memset(g_game_state[room_id].piece_positions[slot], 0,
+               sizeof(g_game_state[room_id].piece_positions[slot]));
+        /* Also resolve any pending gun decision they were in the middle of. */
+        g_game_state[room_id].pending_gun_choice[slot] = false;
+        pthread_mutex_unlock(&g_game_mutex);
+    }
+
+    /* 2. Remove the player from the turn rotation and adjust current_idx.
+     *
+     * After the shift:
+     *   disc_idx < current_idx  → current_idx-- (element before current removed)
+     *   disc_idx == current_idx → set current_idx so advance_turn()'s +1
+     *                             lands on the old next player
+     *   disc_idx > current_idx  → no change needed
+     */
+    int was_current = 0;
+
+    pthread_mutex_lock(&g_turn_mutex);
+    turn_state_t *ts = &g_turn_state[room_id];
+
+    int disc_idx = -1;
+    for (int i = 0; i < ts->player_count; i++) {
+        if (ts->turn_order[i] == disc_user_id) { disc_idx = i; break; }
+    }
+
+    if (disc_idx >= 0 && ts->player_count > 1) {
+        was_current = (disc_idx == ts->current_idx);
+
+        /* Shift remaining entries left. */
+        for (int i = disc_idx; i < ts->player_count - 1; i++)
+            ts->turn_order[i] = ts->turn_order[i + 1];
+        ts->player_count--;
+
+        if (was_current) {
+            /* advance_turn() will do (current_idx + 1) % player_count.
+             * We want it to land on disc_idx % new_player_count, so subtract 1. */
+            ts->current_idx = (disc_idx - 1 + ts->player_count) % ts->player_count;
+        } else if (disc_idx < ts->current_idx) {
+            ts->current_idx--;
+        }
+    } else if (disc_idx >= 0) {
+        /* Last player in the rotation — just clear, no turn to advance. */
+        ts->player_count = 0;
+    }
+
+    pthread_mutex_unlock(&g_turn_mutex);
+
+    /* 3. If it was their turn, cancel the running timer and hand off. */
+    if (was_current) {
+        turn_timer_cancel(room_id);
+        advance_turn(room_id, disc_user_id, live, db, db_mutex, match_id);
+    }
+
+    char log[128];
+    snprintf(log, sizeof(log),
+             "[game] room %d: player %d (%s) disconnected — pieces cleared, "
+             "turn rotation patched (was_current=%d)\n",
+             room_id, disc_user_id, color, was_current);
+    tlog(log);
+}
+
 void chair_state_init(int room_id, int match_id, int player_count)
 {
     pthread_mutex_lock(&g_chair_mutex);
