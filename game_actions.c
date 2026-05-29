@@ -239,6 +239,10 @@ typedef struct {
 static volatile int    g_timer_gen[NUM_ROOMS + 1];  /* bump = cancel           */
 static pthread_mutex_t g_timer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static void do_eliminate_player(int room_id, int elim_user_id, int elim_slot,
+                                 client_list_t *live, db_t *db,
+                                 pthread_mutex_t *db_mutex, int match_id);
+
 static void *turn_timer_thread(void *arg)
 {
     turn_timer_args_t *a = (turn_timer_args_t *)arg;
