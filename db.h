@@ -19,6 +19,9 @@ int db_update_skin(db_t *db, int user_id, int skin_id);
 /* Points: add delta (may be negative) to a user's score, floored at 0. */
 int db_add_points(db_t *db, int user_id, int delta);
 
+/* Returns 1 if a user with this username exists, 0 if not, -1 on query error. */
+int db_username_exists(db_t *db, const char *username);
+
 /* Match lifecycle */
 int db_create_match(db_t *db, int room_id);                                       /* INSERT WAITING match, returns match_id or -1 */
 int db_add_participants(db_t *db, int match_id, int *user_ids, int count);        /* INSERT match_participants rows */

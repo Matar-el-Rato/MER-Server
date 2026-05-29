@@ -103,6 +103,24 @@ int db_update_skin(db_t *db, int user_id, int skin_id) {
     return 0;
 }
 
+int db_username_exists(db_t *db, const char *username) {
+    mysql_ping(db->conn);
+    char esc[2 * 50 + 1];
+    mysql_real_escape_string(db->conn, esc, username, strlen(username));
+    char query[256];
+    snprintf(query, sizeof(query),
+        "SELECT 1 FROM users WHERE username='%s' LIMIT 1", esc);
+    if (mysql_query(db->conn, query)) {
+        fprintf(stderr, "db_username_exists error: %s\n", mysql_error(db->conn));
+        return -1;
+    }
+    MYSQL_RES *res = mysql_store_result(db->conn);
+    if (!res) return -1;
+    int exists = mysql_fetch_row(res) ? 1 : 0;
+    mysql_free_result(res);
+    return exists;
+}
+
 int db_add_points(db_t *db, int user_id, int delta) {
     mysql_ping(db->conn);
     char query[256];

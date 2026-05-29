@@ -987,6 +987,17 @@ void handle_client(int sock_conn, db_t *db) {
         snprintf(log_msg, sizeof(log_msg), "History request for user: %s\n", req.username);
         tlog(log_msg);
 
+        /* Distinguish "no such user" (RES_ERR_INVALID_INPUT) from "user exists but
+         * has no games" (RES_SUCCESS + empty array), so the client can message both. */
+        if (db_username_exists(db, req.username) == 0) {
+            uint8_t  code   = RES_ERR_INVALID_INPUT;
+            uint32_t be_len = htonl(0);
+            write(sock_conn, &code, 1);
+            write(sock_conn, &be_len, 4);
+            close(sock_conn);
+            return;
+        }
+
         const size_t cap = 16384;
         char *json = malloc(cap);
         uint8_t  code = RES_SUCCESS;
