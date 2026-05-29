@@ -619,6 +619,10 @@ static bool do_eliminate_player(int room_id, int elim_user_id, int elim_slot,
 
     pthread_mutex_lock(&g_turn_mutex);
     turn_state_t *ts = &g_turn_state[room_id];
+    /* Elimination order IS the ranking: the number of players still in the match
+     * (including the one being eliminated now) is this player's finish position.
+     * First eliminated of N → N; the last survivor → 1 (set below). */
+    int elim_position = ts->player_count;
     int disc_idx = -1;
     for (int i = 0; i < ts->player_count; i++)
         if (ts->turn_order[i] == elim_user_id) { disc_idx = i; break; }
@@ -640,6 +644,11 @@ static bool do_eliminate_player(int room_id, int elim_user_id, int elim_slot,
     fprintf(stdout, "[game] room %d: player %d eliminated — pieces cleared, rotation patched\n",
             room_id, elim_user_id);
 
+    /* Record the eliminated player's placement (history). */
+    pthread_mutex_lock(db_mutex);
+    db_set_finish_position(db, match_id, elim_user_id, elim_position);
+    pthread_mutex_unlock(db_mutex);
+
     if (survivor >= 0) {
         len = snprintf(json, sizeof(json),
             "{\"action\":\"" ACTION_GAME_OVER "\","
@@ -647,6 +656,9 @@ static bool do_eliminate_player(int room_id, int elim_user_id, int elim_slot,
         broadcast_game_action_to_room(live, room_id, json, len);
         pthread_mutex_lock(db_mutex);
         db_log_event(db, match_id, survivor, ACTION_GAME_OVER, json);
+        /* Survivor places 1st and the match is now FINISHED. */
+        db_set_finish_position(db, match_id, survivor, 1);
+        db_finish_match(db, match_id, survivor);
         pthread_mutex_unlock(db_mutex);
         pthread_mutex_lock(&g_game_mutex);
         g_game_state[room_id].active = false;
@@ -1250,7 +1262,49 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
             pthread_mutex_lock(&g_game_mutex);
             g_game_state[room_id].active = false;
             pthread_mutex_unlock(&g_game_mutex);
+
+            /* ── Record finished match + full placements (history) ──────────────
+             * Winner places 1st; the rest are ranked by pieces-in-goal desc. */
+            int hist_uid[MAX_ROOM_PLAYERS];
+            int hist_fin[MAX_ROOM_PLAYERS];
+            int hist_n = 0;
+            pthread_mutex_lock(&g_chair_mutex);
+            int pcount = g_chair_state[room_id].player_count;
+            for (int i = 0; i < pcount && i < MAX_ROOM_PLAYERS; i++) {
+                int uid = g_chair_state[room_id].slots[i].user_id;
+                if (uid > 0) hist_uid[hist_n++] = uid;
+            }
+            pthread_mutex_unlock(&g_chair_mutex);
+
+            pthread_mutex_lock(&g_game_mutex);
+            for (int i = 0; i < hist_n; i++) {
+                int s = user_id_to_slot(room_id, hist_uid[i]);
+                hist_fin[i] = (s >= 0) ? count_finished(room_id, s) : 0;
+            }
+            pthread_mutex_unlock(&g_game_mutex);
+
+            pthread_mutex_lock(db_mutex);
+            db_log_event(db, match_id, user_id, ACTION_GAME_OVER, win_json);
+            db_set_finish_position(db, match_id, user_id, 1);
+            /* Selection-sort the non-winners by pieces-in-goal desc → positions 2..N. */
+            bool used[MAX_ROOM_PLAYERS] = { false };
+            int  next_pos = 2;
+            for (int placed = 1; placed < hist_n; placed++) {
+                int best = -1;
+                for (int i = 0; i < hist_n; i++) {
+                    if (used[i] || hist_uid[i] == user_id) continue;
+                    if (best == -1 || hist_fin[i] > hist_fin[best]) best = i;
+                }
+                if (best == -1) break;
+                used[best] = true;
+                db_set_finish_position(db, match_id, hist_uid[best], next_pos++);
+            }
+            db_finish_match(db, match_id, user_id);
+            pthread_mutex_unlock(db_mutex);
+
             turn_timer_cancel(room_id);
+            fprintf(stdout, "[game] room %d: game over by race — winner user_id=%d\n",
+                    room_id, user_id);
             return;
         }
     }

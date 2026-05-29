@@ -961,6 +961,52 @@ void handle_client(int sock_conn, db_t *db) {
            3. Trigger "Game Logic Engine" to determine the next state.
            4. Notify other room participants of the change.
         */
+
+    } else if (req_type == REQ_GET_HISTORY) {
+        /* Stateless match-history fetch.
+         * Request:  [type][username 12B]
+         * Response: [code 1B][json_len 4B BE][json bytes] */
+        history_req_t req;
+        memset(&req, 0, sizeof(req));
+        req.type = REQ_GET_HISTORY;
+
+        char  *dst       = (char *)&req + sizeof(uint8_t);
+        size_t remaining = sizeof(history_req_t) - sizeof(uint8_t);
+        bool   read_ok   = true;
+        while (remaining > 0) {
+            ssize_t n = read(sock_conn, dst, remaining);
+            if (n <= 0) { read_ok = false; break; }
+            dst       += n;
+            remaining -= (size_t)n;
+        }
+        req.username[MAX_USERNAME - 1] = '\0';
+
+        if (!read_ok) { close(sock_conn); return; }
+
+        char log_msg[128];
+        snprintf(log_msg, sizeof(log_msg), "History request for user: %s\n", req.username);
+        tlog(log_msg);
+
+        const size_t cap = 16384;
+        char *json = malloc(cap);
+        uint8_t  code = RES_SUCCESS;
+        uint32_t json_len = 0;
+
+        if (json == NULL) {
+            code = RES_ERR_DATABASE;
+        } else {
+            int n = db_get_match_history_json(db, req.username, json, cap);
+            if (n < 0) { code = RES_ERR_DATABASE; json_len = 0; }
+            else        json_len = (uint32_t)strlen(json);
+        }
+
+        uint32_t be_len = htonl(json_len);
+        write(sock_conn, &code, 1);
+        write(sock_conn, &be_len, 4);
+        if (json != NULL) {
+            if (json_len > 0) write(sock_conn, json, json_len);
+            free(json);
+        }
     }
 
     close(sock_conn);

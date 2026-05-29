@@ -21,7 +21,8 @@ typedef enum {
     REQ_LEAVE_ROOM   = 8,
     REQ_CONNECT_LIVE = 9, // Open a persistent connection for server-push notifications
     REQ_READY        = 13, // Signal player is ready to start; server starts countdown when all room members ready
-    REQ_UNREADY      = 16  // Cancel ready state before the countdown begins
+    REQ_UNREADY      = 16, // Cancel ready state before the countdown begins
+    REQ_GET_HISTORY  = 18  // Stateless: fetch a user's match history (see history_req_t / history response below)
 } request_type_t;
 
 // Push Message Types (server -> client, unsolicited)
@@ -72,6 +73,19 @@ typedef struct {
     uint8_t code;
     char message[128];
 } generic_res_t;
+
+// Sent by the client on a fresh (stateless) connection to fetch match history.
+// packed: no padding after type byte. Wire size: 1 + 12 = 13 bytes.
+// The username is the player whose history is requested (not necessarily the caller).
+//
+// RESPONSE (variable length, not a fixed struct):
+//   [code 1B][json_len 4B big-endian][json bytes]
+// json is a UTF-8 array of match objects; see db_get_match_history_json in db.c.
+// On error: code = RES_ERR_DATABASE and json_len = 0.
+typedef struct __attribute__((packed)) {
+    uint8_t type;                    // REQ_GET_HISTORY
+    char    username[MAX_USERNAME];  // zero-padded, not necessarily null-terminated
+} history_req_t;
 
 // Sent by the client after a successful login to open a persistent connection.
 // packed: prevents 3-byte padding that gcc would insert between username[12] and the

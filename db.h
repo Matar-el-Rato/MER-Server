@@ -21,10 +21,17 @@ int db_create_match(db_t *db, int room_id);                                     
 int db_add_participants(db_t *db, int match_id, int *user_ids, int count);        /* INSERT match_participants rows */
 int db_start_match(db_t *db, int match_id);                                       /* status → PLAYING, start_time = NOW() */
 int db_cancel_match(db_t *db, int match_id);                                      /* status → CANCELLED, end_time = NOW() */
+int db_finish_match(db_t *db, int match_id, int winner_user_id);                  /* status → FINISHED, end_time = NOW(), winner_id (NULL if <=0) */
+int db_set_finish_position(db_t *db, int match_id, int user_id, int position);    /* UPDATE match_participants SET finish_position */
 
 /* Game actions */
 int db_set_chair(db_t *db, int match_id, int user_id, const char *color);        /* UPDATE match_participants SET chair_color */
 int db_log_event(db_t *db, int match_id, int user_id,
                  const char *event_type, const char *event_data);                 /* INSERT match_events row */
+
+/* Match history */
+/* Builds a JSON array of every match `username` participated in (newest first,
+ * capped at 50) into `out`. Returns the match count, or -1 on query error. */
+int db_get_match_history_json(db_t *db, const char *username, char *out, size_t out_cap);
 
 #endif // DB_H
