@@ -146,6 +146,11 @@ extern pthread_mutex_t g_game_mutex;
 /* Writes "[HH:MM:SS] msg" to stdout. Defined in server.c. */
 void tlog(const char *msg);
 
+/* Clears the server's active-match tracker for a room once its game has ended
+ * (finished). Prevents a later room-empty event from attempting a bogus cancel
+ * on an already-finished match. Defined in server.c. */
+void mark_match_ended(int room_id);
+
 /* Reads config.txt and applies testing overrides. Called automatically at each
  * initiative_sequence; call manually if you need an earlier load. */
 void config_load(const char *path);

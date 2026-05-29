@@ -690,6 +690,7 @@ static bool do_eliminate_player(int room_id, int elim_user_id, int elim_slot,
         g_game_state[room_id].active = false;
         pthread_mutex_unlock(&g_game_mutex);
         turn_timer_cancel(room_id);
+        mark_match_ended(room_id);  /* match is FINISHED; don't let a later leave cancel it */
         fprintf(stdout, "[game] room %d: game over by elimination — winner user_id=%d\n",
                 room_id, survivor);
         return true;
@@ -1330,6 +1331,7 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
             award_match_points(room_id, user_id, db, db_mutex);
 
             turn_timer_cancel(room_id);
+            mark_match_ended(room_id);  /* match is FINISHED; don't let a later leave cancel it */
             fprintf(stdout, "[game] room %d: game over by race — winner user_id=%d\n",
                     room_id, user_id);
             return;

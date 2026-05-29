@@ -74,6 +74,16 @@ static int g_active_match[NUM_ROOMS + 1] = {0};
  * a db_* function must hold g_db_mutex for the duration of the call. */
 static pthread_mutex_t g_db_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Called from game_actions.c when a match finishes. Clears g_active_match so the
+ * room-empty path (leave/disconnect) won't later try to CANCEL an already-finished
+ * match. Acquires g_live.mutex, which guards g_active_match. */
+void mark_match_ended(int room_id) {
+    if (room_id < 1 || room_id > NUM_ROOMS) return;
+    pthread_mutex_lock(&g_live.mutex);
+    g_active_match[room_id] = 0;
+    pthread_mutex_unlock(&g_live.mutex);
+}
+
 static void handle_shutdown(int sig) {
     (void)sig;
     tlog("\nShutting down...\n");
