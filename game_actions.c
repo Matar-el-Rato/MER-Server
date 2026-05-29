@@ -158,8 +158,11 @@ static void award_match_points(int room_id, int winner_user_id,
     int uids[MAX_ROOM_PLAYERS];
     int n = 0;
     pthread_mutex_lock(&g_chair_mutex);
-    int pc = g_chair_state[room_id].player_count;
-    for (int i = 0; i < pc && i < MAX_ROOM_PLAYERS; i++) {
+    /* Chair slots are colour-indexed (0=blue,1=green,2=yellow,3=red) and SPARSE —
+     * a 2-player match may sit in slots 0 and 3 — so scan every slot, not just
+     * [0..player_count). Using player_count as the bound silently misses players
+     * seated in the higher colour slots (the cause of points never changing). */
+    for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
         int u = g_chair_state[room_id].slots[i].user_id;
         if (u > 0) uids[n++] = u;
     }
@@ -1296,8 +1299,8 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
             int hist_fin[MAX_ROOM_PLAYERS];
             int hist_n = 0;
             pthread_mutex_lock(&g_chair_mutex);
-            int pcount = g_chair_state[room_id].player_count;
-            for (int i = 0; i < pcount && i < MAX_ROOM_PLAYERS; i++) {
+            /* Colour-indexed slots are sparse — scan all of them, not [0..player_count). */
+            for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
                 int uid = g_chair_state[room_id].slots[i].user_id;
                 if (uid > 0) hist_uid[hist_n++] = uid;
             }
