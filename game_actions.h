@@ -143,6 +143,9 @@ extern pthread_mutex_t g_game_mutex;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
+/* Writes "[HH:MM:SS] msg" to stdout. Defined in server.c. */
+void tlog(const char *msg);
+
 /* Reads config.txt and applies testing overrides. Called automatically at each
  * initiative_sequence; call manually if you need an earlier load. */
 void config_load(const char *path);

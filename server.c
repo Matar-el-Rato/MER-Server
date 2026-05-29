@@ -22,7 +22,7 @@
 
 /* Writes "[HH:MM:SS] " followed by msg to stdout.
  * Used for all server log lines so every entry carries an absolute timestamp. */
-static void tlog(const char *msg) {
+void tlog(const char *msg) {
     time_t     now = time(NULL);
     struct tm *tm  = localtime(&now);
     char       ts[16];
