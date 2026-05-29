@@ -325,6 +325,10 @@ static void *turn_timer_thread(void *arg)
                 pthread_mutex_lock(db_mutex);
                 db_log_event(db, match_id, user_id, ACTION_LIFE_LOST, json);
                 pthread_mutex_unlock(db_mutex);
+
+                if (lives <= 0)
+                    do_eliminate_player(room_id, user_id, slot,
+                                        live, db, db_mutex, match_id);
             }
 
             /* Skip to the next player (re-arms the timer for them). */
@@ -584,6 +588,50 @@ void handle_player_disconnected(int room_id, int disc_user_id, const char *color
     tlog(log);
 }
 
+/* Broadcast player_eliminated, mark the slot eliminated, clear pieces, and
+ * remove the player from the turn rotation.  Does NOT call advance_turn —
+ * the caller handles that when the eliminated player was the current one. */
+static void do_eliminate_player(int room_id, int elim_user_id, int elim_slot,
+                                 client_list_t *live, db_t *db,
+                                 pthread_mutex_t *db_mutex, int match_id)
+{
+    char json[128];
+    int  len = snprintf(json, sizeof(json),
+        "{\"action\":\"" ACTION_PLAYER_ELIMINATED "\",\"user_id\":%d}", elim_user_id);
+    broadcast_game_action_to_room(live, room_id, json, len);
+    pthread_mutex_lock(db_mutex);
+    db_log_event(db, match_id, elim_user_id, ACTION_PLAYER_ELIMINATED, json);
+    pthread_mutex_unlock(db_mutex);
+
+    pthread_mutex_lock(&g_game_mutex);
+    g_game_state[room_id].is_eliminated[elim_slot] = true;
+    memset(g_game_state[room_id].piece_positions[elim_slot], 0,
+           sizeof(g_game_state[room_id].piece_positions[elim_slot]));
+    pthread_mutex_unlock(&g_game_mutex);
+
+    pthread_mutex_lock(&g_turn_mutex);
+    turn_state_t *ts = &g_turn_state[room_id];
+    int disc_idx = -1;
+    for (int i = 0; i < ts->player_count; i++)
+        if (ts->turn_order[i] == elim_user_id) { disc_idx = i; break; }
+    if (disc_idx >= 0 && ts->player_count > 1) {
+        int was_current = (disc_idx == ts->current_idx);
+        for (int i = disc_idx; i < ts->player_count - 1; i++)
+            ts->turn_order[i] = ts->turn_order[i + 1];
+        ts->player_count--;
+        if (was_current)
+            ts->current_idx = (disc_idx - 1 + ts->player_count) % ts->player_count;
+        else if (disc_idx < ts->current_idx)
+            ts->current_idx--;
+    } else if (disc_idx >= 0) {
+        ts->player_count = 0;
+    }
+    pthread_mutex_unlock(&g_turn_mutex);
+
+    fprintf(stdout, "[game] room %d: player %d eliminated — pieces cleared, rotation patched\n",
+            room_id, elim_user_id);
+}
+
 void chair_state_init(int room_id, int match_id, int player_count)
 {
     pthread_mutex_lock(&g_chair_mutex);
@@ -794,6 +842,10 @@ static void handle_roll_dice(int fd, int user_id,
                 "{\"action\":\"" ACTION_LIFE_LOST "\",\"user_id\":%d,\"lives_remaining\":%d,\"reason\":\"triple_double\"}",
                 user_id, lives);
             broadcast_game_action_to_room(live, room_id, pen_json, (int)strlen(pen_json));
+
+            if (lives <= 0)
+                do_eliminate_player(room_id, user_id, slot,
+                                    live, db, db_mutex, match_id);
         }
 
         advance_turn(room_id, user_id, live, db, db_mutex, match_id);
@@ -1450,6 +1502,10 @@ static void handle_use_gun(int fd, int user_id, int match_id, int room_id,
             pthread_mutex_lock(db_mutex);
             db_log_event(db, match_id, user_id, ACTION_GUN_RESULT, result_json);
             pthread_mutex_unlock(db_mutex);
+
+            if (lives <= 0)
+                do_eliminate_player(room_id, victim_user_id, victim_slot,
+                                    live, db, db_mutex, match_id);
 
         } else {
             /* ── Misfire: no capture. Attacker's piece is sent back to base. ── */
