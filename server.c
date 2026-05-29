@@ -1007,6 +1007,32 @@ void handle_client(int sock_conn, db_t *db) {
             if (json_len > 0) write(sock_conn, json, json_len);
             free(json);
         }
+
+    } else if (req_type == REQ_GET_LEADERBOARD) {
+        /* Stateless leaderboard fetch. No payload beyond the type byte.
+         * Response: [code 1B][json_len 4B BE][json bytes] (same as history). */
+        tlog("Leaderboard request\n");
+
+        const size_t cap = 16384;
+        char *json = malloc(cap);
+        uint8_t  code = RES_SUCCESS;
+        uint32_t json_len = 0;
+
+        if (json == NULL) {
+            code = RES_ERR_DATABASE;
+        } else {
+            int n = db_get_leaderboard_json(db, json, cap);
+            if (n < 0) { code = RES_ERR_DATABASE; json_len = 0; }
+            else        json_len = (uint32_t)strlen(json);
+        }
+
+        uint32_t be_len = htonl(json_len);
+        write(sock_conn, &code, 1);
+        write(sock_conn, &be_len, 4);
+        if (json != NULL) {
+            if (json_len > 0) write(sock_conn, json, json_len);
+            free(json);
+        }
     }
 
     close(sock_conn);

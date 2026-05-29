@@ -22,7 +22,9 @@ typedef enum {
     REQ_CONNECT_LIVE = 9, // Open a persistent connection for server-push notifications
     REQ_READY        = 13, // Signal player is ready to start; server starts countdown when all room members ready
     REQ_UNREADY      = 16, // Cancel ready state before the countdown begins
-    REQ_GET_HISTORY  = 18  // Stateless: fetch a user's match history (see history_req_t / history response below)
+    REQ_GET_HISTORY  = 18, // Stateless: fetch a user's match history (see history_req_t / history response below)
+    REQ_GET_LEADERBOARD = 19 // Stateless: fetch top players by points. Request is the type byte only;
+                             // response uses the same [code 1B][json_len 4B BE][json] layout as history.
 } request_type_t;
 
 // Push Message Types (server -> client, unsolicited)

@@ -146,6 +146,31 @@ static int count_finished(int room_id, int slot)
     return n;
 }
 
+/* Scoring on a completed match: winner +100, every other participant -50
+ * (db_add_points floors at 0). Only call on a real finish — cancelled/abandoned
+ * matches must not score. Reads the original roster from chair state, which keeps
+ * every player's user_id even after disconnects. */
+#define POINTS_WIN  100
+#define POINTS_LOSS (-50)
+static void award_match_points(int room_id, int winner_user_id,
+                               db_t *db, pthread_mutex_t *db_mutex)
+{
+    int uids[MAX_ROOM_PLAYERS];
+    int n = 0;
+    pthread_mutex_lock(&g_chair_mutex);
+    int pc = g_chair_state[room_id].player_count;
+    for (int i = 0; i < pc && i < MAX_ROOM_PLAYERS; i++) {
+        int u = g_chair_state[room_id].slots[i].user_id;
+        if (u > 0) uids[n++] = u;
+    }
+    pthread_mutex_unlock(&g_chair_mutex);
+
+    pthread_mutex_lock(db_mutex);
+    for (int i = 0; i < n; i++)
+        db_add_points(db, uids[i], uids[i] == winner_user_id ? POINTS_WIN : POINTS_LOSS);
+    pthread_mutex_unlock(db_mutex);
+}
+
 /* Broadcast a piece-level capture: send victim piece home and report it. */
 static void do_capture(int room_id, int attacker_user_id, int victim_slot, int victim_piece,
                         int square, client_list_t *live, db_t *db, pthread_mutex_t *db_mutex,
@@ -660,6 +685,7 @@ static bool do_eliminate_player(int room_id, int elim_user_id, int elim_slot,
         db_set_finish_position(db, match_id, survivor, 1);
         db_finish_match(db, match_id, survivor);
         pthread_mutex_unlock(db_mutex);
+        award_match_points(room_id, survivor, db, db_mutex);
         pthread_mutex_lock(&g_game_mutex);
         g_game_state[room_id].active = false;
         pthread_mutex_unlock(&g_game_mutex);
@@ -1301,6 +1327,7 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
             }
             db_finish_match(db, match_id, user_id);
             pthread_mutex_unlock(db_mutex);
+            award_match_points(room_id, user_id, db, db_mutex);
 
             turn_timer_cancel(room_id);
             fprintf(stdout, "[game] room %d: game over by race — winner user_id=%d\n",

@@ -12,17 +12,16 @@ CREATE TABLE IF NOT EXISTS `users` (
     `username` VARCHAR(50) NOT NULL UNIQUE,
     `password_hash` VARCHAR(256) NOT NULL,
     `skin_id` INT DEFAULT 101,
-    `points` INT DEFAULT 0,
+    -- Every account starts with 500 points; +100 for a win, -50 for a loss (floored at 0).
+    `points` INT NOT NULL DEFAULT 500,
     `created_at` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
 -- 2. Rooms
--- Tracks the 3 physical server rooms.
--- current_players field allows the server to check for capacity before letting someone join.
+-- Exists only as the FK target for matches.room_id. Room capacity / occupancy is
+-- tracked in-memory by the server (MAX_ROOM_PLAYERS + the live client list), not here.
 CREATE TABLE IF NOT EXISTS `rooms` (
-    `id` INT PRIMARY KEY,
-    `max_players` INT DEFAULT 4,
-    `current_players` INT DEFAULT 0
+    `id` INT PRIMARY KEY
 ) ENGINE=InnoDB;
 
 -- 3. Matches
@@ -71,24 +70,6 @@ CREATE TABLE IF NOT EXISTS `match_events` (
     FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
--- 6. Chat Messages
--- Chat messages registered.
--- match_id is NULL for lobby chat, but populated for in-game "trash talk".
-CREATE TABLE IF NOT EXISTS `chat_messages` (
-    `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `room_id` INT NOT NULL,
-    `match_id` INT DEFAULT NULL,
-    `user_id` INT NOT NULL,
-    `content` TEXT NOT NULL,
-    `sent_at` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (`room_id`) REFERENCES `rooms`(`id`),
-    FOREIGN KEY (`match_id`) REFERENCES `matches`(`id`) ON DELETE CASCADE,
-    FOREIGN KEY (`user_id`) REFERENCES `users`(`id`)
-) ENGINE=InnoDB;
-
 -- Initialization: Create the 3 local rooms.
--- ON DUPLICATE KEY UPDATE: makes the script safe to run multiple times.
--- If the room exists, it updates max_players but DOES NOT reset current_players.
-INSERT INTO `rooms` (`id`, `max_players`, `current_players`) 
-VALUES (1, 4, 0), (2, 4, 0), (3, 4, 0)
-ON DUPLICATE KEY UPDATE `max_players` = VALUES(`max_players`);
+-- INSERT IGNORE makes the script safe to run multiple times.
+INSERT IGNORE INTO `rooms` (`id`) VALUES (1), (2), (3);

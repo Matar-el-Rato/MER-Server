@@ -16,6 +16,9 @@ int db_authenticate_user(db_t *db, const char *username, const char *password_ha
 int db_get_skin_id(db_t *db, int user_id); /* returns 101 on any error */
 int db_update_skin(db_t *db, int user_id, int skin_id);
 
+/* Points: add delta (may be negative) to a user's score, floored at 0. */
+int db_add_points(db_t *db, int user_id, int delta);
+
 /* Match lifecycle */
 int db_create_match(db_t *db, int room_id);                                       /* INSERT WAITING match, returns match_id or -1 */
 int db_add_participants(db_t *db, int match_id, int *user_ids, int count);        /* INSERT match_participants rows */
@@ -33,5 +36,9 @@ int db_log_event(db_t *db, int match_id, int user_id,
 /* Builds a JSON array of every match `username` participated in (newest first,
  * capped at 50) into `out`. Returns the match count, or -1 on query error. */
 int db_get_match_history_json(db_t *db, const char *username, char *out, size_t out_cap);
+
+/* Builds a JSON array of the top players by points (desc, capped at 100) into
+ * `out`. Returns the row count, or -1 on query error. */
+int db_get_leaderboard_json(db_t *db, char *out, size_t out_cap);
 
 #endif // DB_H

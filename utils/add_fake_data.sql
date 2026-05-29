@@ -4,11 +4,11 @@
 USE `matarelrato-db`;
 
 -- 1. Add Fake Users
-INSERT INTO users (username, password_hash, skin_id, points) VALUES 
-('BoltyTheDog', 'hash1', 1, 1500),
-('MacabrePlayer', 'hash2', 2, 800),
-('ShadowHunter', 'hash3', 3, 2200),
-('NoobMaster69', 'hash4', 0, 100);
+INSERT INTO users (username, password_hash, skin_id, points) VALUES
+('BoltyTheDog', 'hash1', 1, 650),
+('MacabrePlayer', 'hash2', 2, 450),
+('ShadowHunter', 'hash3', 3, 800),
+('NoobMaster69', 'hash4', 0, 0);
 
 -- 2. Add Fake Matches
 -- Room 1: Finished Match
@@ -36,12 +36,3 @@ INSERT INTO match_events (match_id, user_id, event_type, event_data) VALUES
 (1, 2, 'SMOKE', '{"duration": 5.5}'),
 (2, 3, 'SHOOT', '{"target_id": 4, "result": "MISS"}');
 
--- 5. Add Chat Messages
-INSERT INTO chat_messages (room_id, match_id, user_id, content) VALUES 
-(1, 1, 1, 'GGEZ'),
-(2, NULL, 3, 'Does anyone want to play in Room 2?'),
-(2, 2, 4, 'Stop shooting me!');
-
--- 6. Update Room Occupancy
-UPDATE rooms SET current_players = 2 WHERE id = 1;
-UPDATE rooms SET current_players = 2 WHERE id = 2;

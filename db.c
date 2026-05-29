@@ -103,6 +103,20 @@ int db_update_skin(db_t *db, int user_id, int skin_id) {
     return 0;
 }
 
+int db_add_points(db_t *db, int user_id, int delta) {
+    mysql_ping(db->conn);
+    char query[256];
+    /* GREATEST(0, ...) clamps the score so it can never drop below zero. */
+    snprintf(query, sizeof(query),
+        "UPDATE users SET points = GREATEST(0, points + (%d)) WHERE id=%d",
+        delta, user_id);
+    if (mysql_query(db->conn, query)) {
+        fprintf(stderr, "db_add_points error: %s\n", mysql_error(db->conn));
+        return -1;
+    }
+    return 0;
+}
+
 int db_create_match(db_t *db, int room_id) {
     mysql_ping(db->conn);
     char query[256];
@@ -326,6 +340,40 @@ int db_get_match_history_json(db_t *db, const char *username, char *out, size_t 
             off += (size_t)snprintf(out + off, out_cap - off, "\",\"position\":%d}", pos);
         }
         off += (size_t)snprintf(out + off, out_cap - off, "]}");
+        count++;
+    }
+
+    if (off + 2 < out_cap) out[off++] = ']';
+    out[off < out_cap ? off : out_cap - 1] = '\0';
+
+    mysql_free_result(res);
+    return count;
+}
+
+int db_get_leaderboard_json(db_t *db, char *out, size_t out_cap) {
+    mysql_ping(db->conn);
+
+    if (mysql_query(db->conn,
+            "SELECT username, points FROM users "
+            "ORDER BY points DESC, username ASC LIMIT 100")) {
+        fprintf(stderr, "db_get_leaderboard_json error: %s\n", mysql_error(db->conn));
+        return -1;
+    }
+    MYSQL_RES *res = mysql_store_result(db->conn);
+    if (!res) return -1;
+
+    size_t off = 0;
+    out[off++] = '[';
+    int count = 0;
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res))) {
+        if (off + 128 >= out_cap) break;
+        if (count > 0) out[off++] = ',';
+        off += (size_t)snprintf(out + off, out_cap - off, "{\"username\":\"");
+        json_escape_append(out, out_cap, &off, row[0] ? row[0] : "");
+        off += (size_t)snprintf(out + off, out_cap - off,
+            "\",\"points\":%s}", row[1] ? row[1] : "0");
         count++;
     }
 
