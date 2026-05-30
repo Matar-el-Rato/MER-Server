@@ -845,11 +845,21 @@ void handle_client(int sock_conn, db_t *db) {
         generic_res_t res;
         memset(&res, 0, sizeof(res));
 
+        /* The wire structs are exactly MAX_USERNAME / MAX_PASSWORD bytes with no room
+         * for a NUL terminator, so a full-length (12-char) value would run
+         * strlen()/crypt() off the end of the struct into adjacent stack memory and
+         * hash non-deterministically — you could register but then never log in again.
+         * Copy into NUL-terminated buffers before using them. */
+        char username[MAX_USERNAME + 1];
+        char password[MAX_PASSWORD + 1];
+        memcpy(username, req.username, MAX_USERNAME); username[MAX_USERNAME] = '\0';
+        memcpy(password, req.password, MAX_PASSWORD); password[MAX_PASSWORD] = '\0';
+
         // Validate username: non-empty and only printable characters
-        int ulen = strlen(req.username);
-        int valid = (ulen > 0 && strlen(req.password) > 0);
+        int ulen = strlen(username);
+        int valid = (ulen > 0 && strlen(password) > 0);
         for (int i = 0; i < ulen && valid; i++) {
-            if (!isprint((unsigned char)req.username[i]))
+            if (!isprint((unsigned char)username[i]))
                 valid = 0;
         }
 
@@ -862,13 +872,13 @@ void handle_client(int sock_conn, db_t *db) {
         }
 
         char log_msg[256];
-        sprintf(log_msg, "Register request for user: %s\n", req.username);
+        sprintf(log_msg, "Register request for user: %s\n", username);
         tlog(log_msg);
 
         // Hash the password before storing
-        char *pass_hash = crypt(req.password, SALT);
+        char *pass_hash = crypt(password, SALT);
 
-        if (db_register_user(db, req.username, pass_hash) == 0) {
+        if (db_register_user(db, username, pass_hash) == 0) {
             res.code = RES_SUCCESS;
             strcpy(res.message, "User registered successfully");
         } else {
@@ -894,17 +904,24 @@ void handle_client(int sock_conn, db_t *db) {
 
         if (!read_ok) { close(sock_conn); return; }
 
+        /* NUL-terminate before strlen/crypt — see the register branch: a 12-char
+         * username/password fills the whole struct field with no terminator. */
+        char username[MAX_USERNAME + 1];
+        char password[MAX_PASSWORD + 1];
+        memcpy(username, req.username, MAX_USERNAME); username[MAX_USERNAME] = '\0';
+        memcpy(password, req.password, MAX_PASSWORD); password[MAX_PASSWORD] = '\0';
+
         char log_msg[256];
-        sprintf(log_msg, "Login request for user: %s\n", req.username);
+        sprintf(log_msg, "Login request for user: %s\n", username);
         tlog(log_msg);
 
         /* Hash the incoming password with the same salt to compare */
-        char *pass_hash = crypt(req.password, SALT);
+        char *pass_hash = crypt(password, SALT);
 
         int user_id, skin_id;
         generic_res_t res;
         memset(&res, 0, sizeof(res));
-        if (db_authenticate_user(db, req.username, pass_hash, &user_id, &skin_id) == 0) {
+        if (db_authenticate_user(db, username, pass_hash, &user_id, &skin_id) == 0) {
             res.code = RES_SUCCESS;
             sprintf(res.message, "Login successful. Welcome ID %d SKIN %d", user_id, skin_id);
             char skin_log[128];
