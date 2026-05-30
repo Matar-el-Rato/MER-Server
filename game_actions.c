@@ -1274,7 +1274,7 @@ static bool has_moveable_pieces_bonus(int slot, int pending_mvs, int positions[]
         int to = parchis_advance(slot, from, pending_mvs);
         if (to < 0) continue;
         if (!parchis_path_clear(slot, from, pending_mvs, positions)) continue;
-        if (!can_land(to, slot, positions)) continue;
+        if (!parchis_can_land(to, slot, positions)) continue;
         return true;
     }
     return false;

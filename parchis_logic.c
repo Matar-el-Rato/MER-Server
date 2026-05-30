@@ -144,7 +144,7 @@ bool parchis_path_clear(int mover_slot, int from_sq, int steps, int positions[][
 }
 
 /* True if mover can land on sq. */
-static bool can_land(int sq, int mover_slot, int positions[][4])
+bool parchis_can_land(int sq, int mover_slot, int positions[][4])
 {
     if (sq == 0) return false;
     if (parchis_is_goal(sq)) return true;
@@ -177,14 +177,14 @@ int parchis_moveable_pieces(int slot, int die1, int die2,
             /* Piece in home — can only exit with a 5. */
             if (!can_exit) continue;
             int exit_sq = PARCHIS_EXIT[slot];
-            if (!can_land(exit_sq, slot, positions)) continue;
+            if (!parchis_can_land(exit_sq, slot, positions)) continue;
             out_pieces[count++] = p;
         } else {
             /* Piece on ring or in corridor — move by total. */
             int to = parchis_advance(slot, from, total);
             if (to < 0) continue;
             if (!parchis_path_clear(slot, from, total, positions)) continue;
-            if (!can_land(to, slot, positions)) continue;
+            if (!parchis_can_land(to, slot, positions)) continue;
             out_pieces[count++] = p;
         }
     }

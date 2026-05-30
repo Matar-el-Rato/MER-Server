@@ -53,6 +53,8 @@ bool parchis_is_barrier(int sq, int blocker_slot, int positions[][4]);
  * from_sq and to_sq (exclusive of from_sq and to_sq). */
 bool parchis_path_clear(int mover_slot, int from_sq, int steps, int positions[][4]);
 
+bool parchis_can_land(int sq, int mover_slot, int positions[][4]);
+
 /* Fill out_pieces[4] with piece indices that can legally be moved.
  * Returns count. Sets *out_can_exit if any home piece can exit.
  * Checks home-exit eligibility, advancement validity, path clarity, and landing. */
