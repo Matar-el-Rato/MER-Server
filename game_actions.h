@@ -42,20 +42,14 @@
 #define ACTION_MAGNIFYING_RESULT    "magnifying_glass_result"
 #define ACTION_HANDCUFFS_APPLIED    "handcuffs_applied"
 #define ACTION_FIRE_AXE_USED        "fire_axe_used"
-#define ACTION_BARRIER_DESTROYED    "barrier_destroyed"
 #define ACTION_LIFE_LOST            "life_lost"
 #define ACTION_PLAYER_ELIMINATED    "player_eliminated"
 #define ACTION_GAME_OVER            "game_over"
 #define ACTION_TURN_TIMER_WARNING   "turn_timer_warning"
 #define ACTION_TURN_TIMER_EXPIRED   "turn_timer_expired"
 
-/* Turn timer: 60 s total, warnings at 30 / 10 / 5 s remaining. */
-#define TURN_TIMER_SECS             60
-
 /* Server → Single client action strings (private MSG_GAME_ACTION) */
 #define ACTION_GUN_AVAILABLE        "gun_available"
-#define ACTION_FIRE_AXE_AVAILABLE   "fire_axe_available"
-#define ACTION_PEEK_RESULT          "peek_result"
 
 /* Item IDs: 0=gun 1=cigarette 2=magnifying_glass 3=handcuffs 4=fire_axe */
 #define ITEM_GUN              0
@@ -182,8 +176,8 @@ void send_game_action_to_fd(int fd, const char *json, int json_len);
 /* Returns the slot index (0-3) for a given user_id in a room, or -1. */
 int user_id_to_slot(int room_id, int user_id);
 
-/* Turn timer: start a 60-second countdown for the given player's turn.
- * Broadcasts warnings at 30/10/5 s remaining; on expiry removes one life
+/* Turn timer: start a 30-second countdown for the given player's turn.
+ * Broadcasts warnings at 20/10/5 s remaining; on expiry removes one life
  * and advances the turn. Automatically cancels any prior timer for the room. */
 void turn_timer_start(int room_id, int match_id, int user_id,
                       client_list_t *live, db_t *db, pthread_mutex_t *db_mutex);

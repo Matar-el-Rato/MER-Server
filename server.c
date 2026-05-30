@@ -368,12 +368,12 @@ static void remove_client(int fd) {
     if (had_chair && leave_match_id != 0) {
         char vacated_json[128];
         snprintf(vacated_json, sizeof(vacated_json),
-            "{\"action\":\"chair_vacated\",\"color\":\"%s\",\"user_id\":%d}",
+            "{\"action\":\"" ACTION_CHAIR_VACATED "\",\"color\":\"%s\",\"user_id\":%d}",
             vacated_color, leave_user_id);
         broadcast_game_action_to_room(&g_live, was_in_room,
                                       vacated_json, (int)strlen(vacated_json));
         pthread_mutex_lock(&g_db_mutex);
-        db_log_event(db_ptr, leave_match_id, leave_user_id, "chair_vacated", vacated_json);
+        db_log_event(db_ptr, leave_match_id, leave_user_id, ACTION_CHAIR_VACATED, vacated_json);
         pthread_mutex_unlock(&g_db_mutex);
 
         /* Clean up in-game state: clear pieces, patch turn order, advance if needed. */

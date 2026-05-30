@@ -782,7 +782,7 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
         g_chair_state[room_id].slots[slot].username[MAX_USERNAME - 1] = '\0';
 
         snprintf(broadcast_json, sizeof(broadcast_json),
-            "{\"action\":\"chair_taken\",\"color\":\"%s\",\"user_id\":%d,\"username\":\"%s\",\"skin_id\":%d}",
+            "{\"action\":\"" ACTION_CHAIR_TAKEN "\",\"color\":\"%s\",\"user_id\":%d,\"username\":\"%s\",\"skin_id\":%d}",
             color, user_id, username, skin_id);
         claimed = 1;
 
@@ -794,7 +794,7 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
         if (filled >= player_count) {
             int pos = 0;
             pos += snprintf(locked_json + pos, sizeof(locked_json) - (size_t)pos,
-                            "{\"action\":\"chairs_locked\",\"assignments\":[");
+                            "{\"action\":\"" ACTION_CHAIRS_LOCKED "\",\"assignments\":[");
             int first = 1;
             for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
                 if (g_chair_state[room_id].slots[i].user_id == 0) continue;
@@ -825,7 +825,7 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
             broadcast_game_action_to_room(live, room_id, locked_json,
                                           (int)strlen(locked_json));
             pthread_mutex_lock(db_mutex);
-            db_log_event(db, match_id, 0, "chairs_locked", locked_json);
+            db_log_event(db, match_id, 0, ACTION_CHAIRS_LOCKED, locked_json);
             pthread_mutex_unlock(db_mutex);
             handle_initiative_sequence(live, room_id, match_id, db, db_mutex);
         }
@@ -1878,6 +1878,12 @@ static void handle_use_magnifying_glass(int fd, int user_id, int match_id, int r
         "{\"action\":\"" ACTION_MAGNIFYING_RESULT "\",\"die1\":%d,\"die2\":%d}",
         die1, die2);
     send_game_action_to_fd(fd, msg, mlen);
+
+    char bmsg[128];
+    int  bmlen = snprintf(bmsg, sizeof(bmsg),
+        "{\"action\":\"" ACTION_MAGNIFYING_USED "\",\"user_id\":%d}",
+        user_id);
+    broadcast_game_action_to_room(live, room_id, bmsg, bmlen);
 
     pthread_mutex_lock(db_mutex);
     db_log_event(db, match_id, user_id, ACTION_MAGNIFYING_RESULT, msg);
