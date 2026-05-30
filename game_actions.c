@@ -412,7 +412,7 @@ void turn_timer_start(int room_id, int match_id, int user_id,
 static void handle_initiative_sequence(client_list_t *live, int room_id, int match_id,
                                         db_t *db, pthread_mutex_t *db_mutex)
 {
-    static const int SHOT_ORDER[] = {2, 0, 3, 1}; /* yellow, blue, red, green */
+    static const int SHOT_ORDER[] = {0, 2, 1, 3}; /* blue, yellow, green, red (clockwise) */
     static const char *ITEM_NAMES[] = {
         "gun", "cigarette", "magnifying_glass", "handcuffs", "fire_axe"
     };
