@@ -834,6 +834,8 @@ static void handle_choose_chair(int fd, int user_id, const char *username,
 
 /* ── Roll dice ─────────────────────────────────────────────────────────────── */
 
+static bool has_axeable_barriers(int room_id);
+
 static void handle_roll_dice(int fd, int user_id,
                               int match_id, int room_id,
                               const char *json,
@@ -959,14 +961,18 @@ static void handle_roll_dice(int fd, int user_id,
     db_log_event(db, match_id, user_id, ACTION_ROLL_DICE, result_json);
     pthread_mutex_unlock(db_mutex);
 
-    /* No moveable pieces → doubles grant a reroll; otherwise auto-pass. */
+    /* No moveable pieces → doubles grant a reroll; otherwise auto-pass (unless we have fire axe to clear blockades). */
     if (n_moveable == 0) {
-        if (is_doubles) {
+        pthread_mutex_lock(&g_game_mutex);
+        bool can_use_axe = (gs->has_item[slot][ITEM_FIRE_AXE] && has_axeable_barriers(room_id));
+        pthread_mutex_unlock(&g_game_mutex);
+
+        if (is_doubles || can_use_axe) {
             char extra_json[128];
             int  elen = snprintf(extra_json, sizeof(extra_json),
                 "{\"action\":\"" ACTION_EXTRA_TURN "\","
-                "\"user_id\":%d,\"reason\":\"doubles\",\"pending_movements\":0}",
-                user_id);
+                "\"user_id\":%d,\"reason\":\"%s\",\"pending_movements\":0}",
+                user_id, is_doubles ? "doubles" : "axe_choice");
             broadcast_game_action_to_room(live, room_id, extra_json, elen);
 
             char ts_json[128];
@@ -1309,60 +1315,59 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
         pthread_mutex_unlock(db_mutex);
 
         if (finished >= 4) {
-            char win_json[128];
-            int  wlen = snprintf(win_json, sizeof(win_json),
-                "{\"action\":\"" ACTION_GAME_OVER "\","
-                "\"winner_user_id\":%d,\"reason\":\"race\"}", user_id);
-            broadcast_game_action_to_room(live, room_id, win_json, wlen);
-            pthread_mutex_lock(&g_game_mutex);
-            g_game_state[room_id].active = false;
-            pthread_mutex_unlock(&g_game_mutex);
+            /* Under the new rule, instead of sending game_over with reason "race" immediately,
+             * we eliminate the other active players one-by-one, in ascending order of their pieces in goal,
+             * so that the winner is the sole survivor and the game ends via the standard elimination sequence. */
 
-            /* ── Record finished match + full placements (history) ──────────────
-             * Winner places 1st; the rest are ranked by pieces-in-goal desc. */
-            int hist_uid[MAX_ROOM_PLAYERS];
-            int hist_fin[MAX_ROOM_PLAYERS];
-            int hist_n = 0;
+            // 1. Collect all other active players in the match
+            int other_uids[MAX_ROOM_PLAYERS];
+            int other_slots[MAX_ROOM_PLAYERS];
+            int other_goals[MAX_ROOM_PLAYERS];
+            int other_count = 0;
+
             pthread_mutex_lock(&g_chair_mutex);
-            /* Colour-indexed slots are sparse — scan all of them, not [0..player_count). */
             for (int i = 0; i < MAX_ROOM_PLAYERS; i++) {
                 int uid = g_chair_state[room_id].slots[i].user_id;
-                if (uid > 0) hist_uid[hist_n++] = uid;
+                if (uid > 0 && uid != user_id) {
+                    pthread_mutex_lock(&g_game_mutex);
+                    bool elim = g_game_state[room_id].is_eliminated[i];
+                    pthread_mutex_unlock(&g_game_mutex);
+
+                    if (!elim) {
+                        other_uids[other_count] = uid;
+                        other_slots[other_count] = i;
+                        pthread_mutex_lock(&g_game_mutex);
+                        other_goals[other_count] = count_finished(room_id, i);
+                        pthread_mutex_unlock(&g_game_mutex);
+                        other_count++;
+                    }
+                }
             }
             pthread_mutex_unlock(&g_chair_mutex);
 
-            pthread_mutex_lock(&g_game_mutex);
-            for (int i = 0; i < hist_n; i++) {
-                int s = user_id_to_slot(room_id, hist_uid[i]);
-                hist_fin[i] = (s >= 0) ? count_finished(room_id, s) : 0;
-            }
-            pthread_mutex_unlock(&g_game_mutex);
+            // 2. Sort the other players by pieces in goal ascending
+            for (int i = 0; i < other_count - 1; i++) {
+                for (int j = 0; j < other_count - i - 1; j++) {
+                    if (other_goals[j] > other_goals[j+1]) {
+                        int temp_uid = other_uids[j];
+                        other_uids[j] = other_uids[j+1];
+                        other_uids[j+1] = temp_uid;
 
-            pthread_mutex_lock(db_mutex);
-            db_log_event(db, match_id, user_id, ACTION_GAME_OVER, win_json);
-            db_set_finish_position(db, match_id, user_id, 1);
-            /* Selection-sort the non-winners by pieces-in-goal desc → positions 2..N. */
-            bool used[MAX_ROOM_PLAYERS] = { false };
-            int  next_pos = 2;
-            for (int placed = 1; placed < hist_n; placed++) {
-                int best = -1;
-                for (int i = 0; i < hist_n; i++) {
-                    if (used[i] || hist_uid[i] == user_id) continue;
-                    if (best == -1 || hist_fin[i] > hist_fin[best]) best = i;
+                        int temp_slot = other_slots[j];
+                        other_slots[j] = other_slots[j+1];
+                        other_slots[j+1] = temp_slot;
+
+                        int temp_goal = other_goals[j];
+                        other_goals[j] = other_goals[j+1];
+                        other_goals[j+1] = temp_goal;
+                    }
                 }
-                if (best == -1) break;
-                used[best] = true;
-                db_set_finish_position(db, match_id, hist_uid[best], next_pos++);
             }
-            db_finish_match(db, match_id, user_id);
-            pthread_mutex_unlock(db_mutex);
-            award_match_points(room_id, user_id, db, db_mutex);
 
-            turn_timer_cancel(room_id);
-            mark_match_ended(room_id);  /* match is FINISHED; don't let a later leave cancel it */
-            fprintf(stdout, "[game] room %d: game over by race — winner user_id=%d\n",
-                    room_id, user_id);
-            return;
+            // 3. Eliminate them one by one
+            for (int i = 0; i < other_count; i++) {
+                do_eliminate_player(room_id, other_uids[i], other_slots[i], live, db, db_mutex, match_id);
+            }
         }
     }
 
@@ -1449,17 +1454,23 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
 
         if (!has_bonus_moves) {
             pthread_mutex_lock(&g_game_mutex);
-            g_game_state[room_id].pending_movements[slot] = 0;
+            bool can_use_axe = (g_game_state[room_id].has_item[slot][ITEM_FIRE_AXE] && has_axeable_barriers(room_id));
             pthread_mutex_unlock(&g_game_mutex);
 
-            char skip_json[128];
-            int  slen = snprintf(skip_json, sizeof(skip_json),
-                "{\"action\":\"" ACTION_EXTRA_TURN "\","
-                "\"user_id\":%d,\"reason\":\"bonus_skipped\",\"pending_movements\":0}",
-                user_id);
-            broadcast_game_action_to_room(live, room_id, skip_json, slen);
+            if (!can_use_axe) {
+                pthread_mutex_lock(&g_game_mutex);
+                g_game_state[room_id].pending_movements[slot] = 0;
+                pthread_mutex_unlock(&g_game_mutex);
 
-            pending_mvs = 0;
+                char skip_json[128];
+                int  slen = snprintf(skip_json, sizeof(skip_json),
+                    "{\"action\":\"" ACTION_EXTRA_TURN "\","
+                    "\"user_id\":%d,\"reason\":\"bonus_skipped\",\"pending_movements\":0}",
+                    user_id);
+                broadcast_game_action_to_room(live, room_id, skip_json, slen);
+
+                pending_mvs = 0;
+            }
         }
     }
 
@@ -1510,7 +1521,29 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
                 broadcast_game_action_to_room(live, room_id, ts_json, tslen);
                 turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
             } else {
-                advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+                pthread_mutex_lock(&g_game_mutex);
+                bool can_use_axe = (g_game_state[room_id].has_item[slot][ITEM_FIRE_AXE] && has_axeable_barriers(room_id));
+                pthread_mutex_unlock(&g_game_mutex);
+
+                if (can_use_axe) {
+                    char extra_json[128];
+                    int  elen = snprintf(extra_json, sizeof(extra_json),
+                        "{\"action\":\"" ACTION_EXTRA_TURN "\","
+                        "\"user_id\":%d,\"reason\":\"axe_choice\",\"pending_movements\":0}",
+                        user_id);
+                    broadcast_game_action_to_room(live, room_id, extra_json, elen);
+
+                    char ts_json[128];
+                    int  tslen = snprintf(ts_json, sizeof(ts_json),
+                        "{\"action\":\"" ACTION_TURN_START "\",\"user_id\":%d,"
+                        "\"consecutive_doubles\":%d,\"pending_movements\":0}",
+                        user_id, 0);
+                    broadcast_game_action_to_room(live, room_id, ts_json, tslen);
+
+                    turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
+                } else {
+                    advance_turn(room_id, user_id, live, db, db_mutex, match_id);
+                }
             }
         } else {
             char dice2_json[256];
@@ -1909,6 +1942,38 @@ static bool square_is_empty(int room_id, int sq)
         for (int p = 0; p < 4; p++)
             if (gs->piece_positions[s][p] == sq) return false;
     return true;
+}
+
+static bool has_axeable_barriers(int room_id)
+{
+    game_state_t *gs = &g_game_state[room_id];
+    for (int sq = 1; sq <= 68; sq++) {
+        int hit_count = 0;
+        int hit_slot[2];
+        for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
+            for (int p = 0; p < 4; p++) {
+                if (gs->piece_positions[s][p] == sq) {
+                    if (hit_count < 2) {
+                        hit_slot[hit_count] = s;
+                    }
+                    hit_count++;
+                }
+            }
+        }
+        if (hit_count != 2) continue;
+
+        bool same_color = (hit_slot[0] == hit_slot[1]);
+        bool on_safe = parchis_is_safe(sq, 0);
+        if (!same_color && !on_safe) continue;
+
+        int prev_sq = ring_prev(sq);
+        int next_sq = ring_next(sq);
+        if (prev_sq == 0 || next_sq == 0) continue;
+        if (!square_is_empty(room_id, prev_sq) || !square_is_empty(room_id, next_sq)) continue;
+
+        return true;
+    }
+    return false;
 }
 
 static void handle_use_fire_axe(int fd, int user_id, int match_id, int room_id,
