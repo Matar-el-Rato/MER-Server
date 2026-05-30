@@ -826,11 +826,21 @@ void handle_client(int sock_conn, db_t *db) {
 
     if (req_type == REQ_REGISTER) {
         register_req_t req;
-        read(sock_conn, (char*)&req + sizeof(uint8_t), sizeof(register_req_t) - sizeof(uint8_t));
+        /* Zero the struct to avoid leaking stack bytes if the socket read is short. */
+        memset(&req, 0, sizeof(req));
 
-        // Ensure null-termination regardless of what the client sent
-        req.username[MAX_USERNAME - 1] = '\0';
-        req.password[MAX_PASSWORD - 1] = '\0';
+        /* Read the remaining bytes in a loop to guarantee the full packet is received. */
+        char *dst = (char *)&req + sizeof(uint8_t);
+        size_t remaining = sizeof(register_req_t) - sizeof(uint8_t);
+        bool read_ok = true;
+        while (remaining > 0) {
+            ssize_t n = read(sock_conn, dst, remaining);
+            if (n <= 0) { read_ok = false; break; }
+            dst += n;
+            remaining -= (size_t)n;
+        }
+
+        if (!read_ok) { close(sock_conn); return; }
 
         generic_res_t res;
         memset(&res, 0, sizeof(res));
@@ -869,13 +879,26 @@ void handle_client(int sock_conn, db_t *db) {
 
     } else if (req_type == REQ_LOGIN) {
         login_req_t req;
-        read(sock_conn, (char*)&req + sizeof(uint8_t), sizeof(login_req_t) - sizeof(uint8_t));
+        memset(&req, 0, sizeof(req));
+
+        /* Read the full login packet reliably. */
+        char *dst = (char *)&req + sizeof(uint8_t);
+        size_t remaining = sizeof(login_req_t) - sizeof(uint8_t);
+        bool read_ok = true;
+        while (remaining > 0) {
+            ssize_t n = read(sock_conn, dst, remaining);
+            if (n <= 0) { read_ok = false; break; }
+            dst += n;
+            remaining -= (size_t)n;
+        }
+
+        if (!read_ok) { close(sock_conn); return; }
 
         char log_msg[256];
         sprintf(log_msg, "Login request for user: %s\n", req.username);
         tlog(log_msg);
 
-        // Hash the incoming password with the same salt to compare
+        /* Hash the incoming password with the same salt to compare */
         char *pass_hash = crypt(req.password, SALT);
 
         int user_id, skin_id;
