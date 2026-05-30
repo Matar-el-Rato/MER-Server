@@ -1084,7 +1084,7 @@ static void handle_move_piece(int fd, int user_id,
     bool blocked = false;
     if (to_sq == PARCHIS_EXIT[slot]) {
         /* Own spawn square: native colour has priority (eats enemies), but you
-         * cannot bring out a 3rd piece when your own 2 already form a barrier
+         * cannot bring out a 3rd piece when your own 2 already form a barrier */
         if (parchis_is_barrier(to_sq, slot, gs->piece_positions)) blocked = true;
     } else if (parchis_is_safe(to_sq, slot)) {
         int occ = 0;
