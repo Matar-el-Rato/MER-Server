@@ -30,10 +30,16 @@ void db_close(db_t *db) {
 
 int db_register_user(db_t *db, const char *username, const char *password_hash) {
     mysql_ping(db->conn);
+    /* Escape both fields — usernames may legitimately contain ' (apostrophe is a
+     * printable char the client allows) and a raw ' breaks the SQL statement. */
+    char esc_user[2 * 64 + 1];
+    char esc_hash[2 * 256 + 1];
+    mysql_real_escape_string(db->conn, esc_user, username, strlen(username));
+    mysql_real_escape_string(db->conn, esc_hash, password_hash, strlen(password_hash));
     char query[1024];
-    snprintf(query, sizeof(query), 
-             "INSERT INTO users (username, password_hash) VALUES ('%s', '%s')", 
-             username, password_hash);
+    snprintf(query, sizeof(query),
+             "INSERT INTO users (username, password_hash) VALUES ('%s', '%s')",
+             esc_user, esc_hash);
 
     if (mysql_query(db->conn, query)) {
         fprintf(stderr, "Registration error: %s\n", mysql_error(db->conn));
@@ -45,11 +51,17 @@ int db_register_user(db_t *db, const char *username, const char *password_hash) 
 
 int db_authenticate_user(db_t *db, const char *username, const char *password_hash, int *user_id, int *skin_id) {
     mysql_ping(db->conn);
+    /* Escape both fields — a raw ' in the username or hash breaks the statement
+     * (and is a SQL-injection vector). */
+    char esc_user[2 * 64 + 1];
+    char esc_hash[2 * 256 + 1];
+    mysql_real_escape_string(db->conn, esc_user, username, strlen(username));
+    mysql_real_escape_string(db->conn, esc_hash, password_hash, strlen(password_hash));
     char query[1024];
     /* COALESCE returns 101 (default skin) when skin_id is NULL (new accounts). */
     snprintf(query, sizeof(query),
              "SELECT id, COALESCE(skin_id, 101) FROM users WHERE username='%s' AND password_hash='%s'",
-             username, password_hash);
+             esc_user, esc_hash);
 
     if (mysql_query(db->conn, query)) {
         fprintf(stderr, "Authentication error: %s\n", mysql_error(db->conn));

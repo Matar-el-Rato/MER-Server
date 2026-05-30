@@ -120,6 +120,10 @@ bool parchis_path_clear(int mover_slot, int from_sq, int steps, int positions[][
             pos = ring_step(pos);
         }
 
+        /* A barrier made of the mover's OWN pieces also blocks the mover — you
+         * cannot jump over your own blockade. */
+        if (parchis_is_barrier(pos, mover_slot, positions)) return false;
+
         if (is_safe_sq(pos)) {
             /* Safe square: mixed barrier (2+ non-mover pieces of any colors) blocks passage. */
             int occ = 0;
@@ -144,8 +148,10 @@ bool parchis_path_clear(int mover_slot, int from_sq, int steps, int positions[][
 static bool can_land(int sq, int mover_slot, int positions[][4])
 {
     if (sq == 0) return false;
-    /* Own spawn square: native color always has landing priority (will eat enemies). */
-    if (sq == PARCHIS_EXIT[mover_slot]) return true;
+    /* Own spawn square: native color has landing priority (will eat enemies),
+     * but you can't add a 3rd piece if your own 2 already form a barrier there. */
+    if (sq == PARCHIS_EXIT[mover_slot])
+        return !parchis_is_barrier(sq, mover_slot, positions);
     /* Safe square: any 2+ non-mover pieces (mixed colors) form a blocking barrier. */
     if (is_safe_sq(sq)) {
         int occ = 0;

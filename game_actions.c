@@ -1082,20 +1082,22 @@ static void handle_move_piece(int fd, int user_id,
      * Safe square: 2+ non-mover pieces of any colors form a blocking barrier.
      * Non-safe square: same-color enemy barrier blocks landing. */
     bool blocked = false;
-    if (to_sq != PARCHIS_EXIT[slot]) {
-        if (parchis_is_safe(to_sq, slot)) {
-            int occ = 0;
-            for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
-                if (s == slot) continue;
-                for (int p = 0; p < 4; p++)
-                    if (gs->piece_positions[s][p] == to_sq) occ++;
-            }
-            blocked = (occ >= 2);
-        } else {
-            for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
-                if (s == slot) continue;
-                if (parchis_is_barrier(to_sq, s, gs->piece_positions)) { blocked = true; break; }
-            }
+    if (to_sq == PARCHIS_EXIT[slot]) {
+        /* Own spawn square: native colour has priority (eats enemies), but you
+         * cannot bring out a 3rd piece when your own 2 already form a barrier
+        if (parchis_is_barrier(to_sq, slot, gs->piece_positions)) blocked = true;
+    } else if (parchis_is_safe(to_sq, slot)) {
+        int occ = 0;
+        for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
+            if (s == slot) continue;
+            for (int p = 0; p < 4; p++)
+                if (gs->piece_positions[s][p] == to_sq) occ++;
+        }
+        blocked = (occ >= 2);
+    } else {
+        for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
+            if (s == slot) continue;
+            if (parchis_is_barrier(to_sq, s, gs->piece_positions)) { blocked = true; break; }
         }
     }
     if (blocked) { pthread_mutex_unlock(&g_game_mutex); return; }
