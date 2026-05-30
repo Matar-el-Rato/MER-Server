@@ -1015,7 +1015,10 @@ static void handle_move_piece(int fd, int user_id,
     turn_timer_cancel(room_id);
 
     int slot = user_id_to_slot(room_id, user_id);
-    if (slot < 0) return;
+    if (slot < 0) {
+        turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
+        return;
+    }
 
     pthread_mutex_lock(&g_game_mutex);
     game_state_t *gs = &g_game_state[room_id];
@@ -1026,6 +1029,7 @@ static void handle_move_piece(int fd, int user_id,
     bool normal_move = (gs->pending_die1 > 0);
     if (!bonus_move && !normal_move) {
         pthread_mutex_unlock(&g_game_mutex);
+        turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
         return;
     }
 
@@ -1045,18 +1049,25 @@ static void handle_move_piece(int fd, int user_id,
         total_steps = steps;
         if (from_sq == 0) {
             pthread_mutex_unlock(&g_game_mutex);
+            turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
             return; /* can't use bonus to exit home */
         }
         to_sq = parchis_advance(slot, from_sq, steps);
-        if (to_sq < 0) { pthread_mutex_unlock(&g_game_mutex); return; }
+        if (to_sq < 0) {
+            pthread_mutex_unlock(&g_game_mutex);
+            turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
+            return;
+        }
         if (!parchis_path_clear(slot, from_sq, steps, gs->piece_positions)) {
             pthread_mutex_unlock(&g_game_mutex);
+            turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
             return;
         }
     } else if (from_sq == 0) {
         /* Exit from home — need a 5 die. */
         if (die1 != 5 && die2 != 5 && (die1 + die2) != 5) {
             pthread_mutex_unlock(&g_game_mutex);
+            turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
             return;
         }
         to_sq       = PARCHIS_EXIT[slot];
@@ -1069,38 +1080,36 @@ static void handle_move_piece(int fd, int user_id,
         int steps   = die1 + die2;
         total_steps = steps;
         to_sq = parchis_advance(slot, from_sq, steps);
-        if (to_sq < 0) { pthread_mutex_unlock(&g_game_mutex); return; }
+        if (to_sq < 0) {
+            pthread_mutex_unlock(&g_game_mutex);
+            turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
+            return;
+        }
 
         if (!parchis_path_clear(slot, from_sq, steps, gs->piece_positions)) {
             pthread_mutex_unlock(&g_game_mutex);
+            turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
             return;
         }
     }
 
     /* Verify landing is allowed.
-     * Own spawn square: native color always has priority (will eat enemies).
-     * Safe square: 2+ non-mover pieces of any colors form a blocking barrier.
-     * Non-safe square: same-color enemy barrier blocks landing. */
+     * A square (excluding goal) can hold at most 2 pieces (disallows 3-piece blockades). */
     bool blocked = false;
-    if (to_sq == PARCHIS_EXIT[slot]) {
-        /* Own spawn square: native colour has priority (eats enemies), but you
-         * cannot bring out a 3rd piece when your own 2 already form a barrier */
-        if (parchis_is_barrier(to_sq, slot, gs->piece_positions)) blocked = true;
-    } else if (parchis_is_safe(to_sq, slot)) {
-        int occ = 0;
+    if (!parchis_is_goal(to_sq)) {
+        int total_occ = 0;
         for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
-            if (s == slot) continue;
-            for (int p = 0; p < 4; p++)
-                if (gs->piece_positions[s][p] == to_sq) occ++;
+            for (int p = 0; p < 4; p++) {
+                if (gs->piece_positions[s][p] == to_sq) total_occ++;
+            }
         }
-        blocked = (occ >= 2);
-    } else {
-        for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
-            if (s == slot) continue;
-            if (parchis_is_barrier(to_sq, s, gs->piece_positions)) { blocked = true; break; }
-        }
+        if (total_occ >= 2) blocked = true;
     }
-    if (blocked) { pthread_mutex_unlock(&g_game_mutex); return; }
+    if (blocked) {
+        pthread_mutex_unlock(&g_game_mutex);
+        turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
+        return;
+    }
 
     /* Apply the move. */
     gs->piece_positions[slot][piece_id] = to_sq;
@@ -1256,6 +1265,20 @@ static void handle_move_piece(int fd, int user_id,
 }
 
 /* ── Item handlers ─────────────────────────────────────────────────────────── */
+
+static bool has_moveable_pieces_bonus(int slot, int pending_mvs, int positions[][4])
+{
+    for (int p = 0; p < 4; p++) {
+        int from = positions[slot][p];
+        if (from <= 0) continue;
+        int to = parchis_advance(slot, from, pending_mvs);
+        if (to < 0) continue;
+        if (!parchis_path_clear(slot, from, pending_mvs, positions)) continue;
+        if (!can_land(to, slot, positions)) continue;
+        return true;
+    }
+    return false;
+}
 
 /* finish_move_turn: runs after all captures are resolved (goal, golden square,
  * turn flow).  Called from handle_move_piece and handle_use_gun. */
@@ -1417,6 +1440,29 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
     int pending_mvs = g_game_state[room_id].pending_movements[slot];
     pthread_mutex_unlock(&g_game_mutex);
 
+    // If there is a pending bonus move, check if any pieces can legally move it.
+    // If not, auto-skip the bonus movement phase entirely.
+    if (pending_mvs > 0) {
+        pthread_mutex_lock(&g_game_mutex);
+        bool has_bonus_moves = has_moveable_pieces_bonus(slot, pending_mvs, g_game_state[room_id].piece_positions);
+        pthread_mutex_unlock(&g_game_mutex);
+
+        if (!has_bonus_moves) {
+            pthread_mutex_lock(&g_game_mutex);
+            g_game_state[room_id].pending_movements[slot] = 0;
+            pthread_mutex_unlock(&g_game_mutex);
+
+            char skip_json[128];
+            int  slen = snprintf(skip_json, sizeof(skip_json),
+                "{\"action\":\"" ACTION_EXTRA_TURN "\","
+                "\"user_id\":%d,\"reason\":\"bonus_skipped\",\"pending_movements\":0}",
+                user_id);
+            broadcast_game_action_to_room(live, room_id, skip_json, slen);
+
+            pending_mvs = 0;
+        }
+    }
+
     if (second_move_die > 0) {
         pthread_mutex_lock(&g_game_mutex);
         int  moveable2[4];
@@ -1448,6 +1494,7 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
                     "\"user_id\":%d,\"reason\":\"%s\",\"pending_movements\":%d}",
                     user_id, reason, pending_mvs);
                 broadcast_game_action_to_room(live, room_id, extra_json, elen);
+                turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
             } else if (five_reroll) {
                 char extra_json[128];
                 int  elen = snprintf(extra_json, sizeof(extra_json),
@@ -1480,6 +1527,7 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
                     "%s%d", i ? "," : "", moveable2[i]);
             d2len += snprintf(dice2_json + d2len, sizeof(dice2_json) - (size_t)d2len, "]}");
             send_game_action_to_fd(fd, dice2_json, d2len);
+            turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
         }
     } else if (pending_mvs > 0) {
         if (is_doubles) {
@@ -1496,6 +1544,7 @@ static void finish_move_turn(int fd, int user_id, int match_id, int room_id, int
             "\"user_id\":%d,\"reason\":\"%s\",\"pending_movements\":%d}",
             user_id, reason, pending_mvs);
         broadcast_game_action_to_room(live, room_id, extra_json, elen);
+        turn_timer_start(room_id, match_id, user_id, live, db, db_mutex);
     } else if (is_doubles) {
         char extra_json[128];
         int  elen = snprintf(extra_json, sizeof(extra_json),

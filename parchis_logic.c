@@ -125,10 +125,9 @@ bool parchis_path_clear(int mover_slot, int from_sq, int steps, int positions[][
         if (parchis_is_barrier(pos, mover_slot, positions)) return false;
 
         if (is_safe_sq(pos)) {
-            /* Safe square: mixed barrier (2+ non-mover pieces of any colors) blocks passage. */
+            /* Safe square: any 2+ pieces of any colors form a barrier and block passage. */
             int occ = 0;
             for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
-                if (s == mover_slot) continue;
                 for (int p = 0; p < 4; p++)
                     if (positions[s][p] == pos) occ++;
             }
@@ -148,25 +147,17 @@ bool parchis_path_clear(int mover_slot, int from_sq, int steps, int positions[][
 static bool can_land(int sq, int mover_slot, int positions[][4])
 {
     if (sq == 0) return false;
-    /* Own spawn square: native color has landing priority (will eat enemies),
-     * but you can't add a 3rd piece if your own 2 already form a barrier there. */
-    if (sq == PARCHIS_EXIT[mover_slot])
-        return !parchis_is_barrier(sq, mover_slot, positions);
-    /* Safe square: any 2+ non-mover pieces (mixed colors) form a blocking barrier. */
-    if (is_safe_sq(sq)) {
-        int occ = 0;
-        for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
-            if (s == mover_slot) continue;
-            for (int p = 0; p < 4; p++)
-                if (positions[s][p] == sq) occ++;
-        }
-        return occ < 2;
-    }
-    /* Non-safe square: same-color enemy barrier blocks landing. */
+    if (parchis_is_goal(sq)) return true;
+
+    /* A square can hold at most 2 pieces (disallows 3-piece blockades). */
+    int total_occ = 0;
     for (int s = 0; s < MAX_ROOM_PLAYERS; s++) {
-        if (s == mover_slot) continue;
-        if (parchis_is_barrier(sq, s, positions)) return false;
+        for (int p = 0; p < 4; p++) {
+            if (positions[s][p] == sq) total_occ++;
+        }
     }
+    if (total_occ >= 2) return false;
+
     return true;
 }
 
